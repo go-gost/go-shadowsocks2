@@ -19,7 +19,7 @@ var _zerononce [128]byte // read-only. 128 bytes is more than enough.
 // Pack encrypts plaintext using Cipher with a randomly generated salt and
 // returns a slice of dst containing the encrypted packet and any error occurred.
 // Ensure len(dst) >= ciph.SaltSize() + len(plaintext) + aead.Overhead().
-func Pack(dst, plaintext []byte, ciph Cipher) ([]byte, error) {
+func Pack(dst, plaintext []byte, ciph internal.ShadowCipher) ([]byte, error) {
 	saltSize := ciph.SaltSize()
 	salt := dst[:saltSize]
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
@@ -30,7 +30,7 @@ func Pack(dst, plaintext []byte, ciph Cipher) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	internal.AddSalt(salt)
+	AddSalt(salt)
 
 	if len(dst) < saltSize+len(plaintext)+aead.Overhead() {
 		return nil, io.ErrShortBuffer
@@ -41,7 +41,7 @@ func Pack(dst, plaintext []byte, ciph Cipher) ([]byte, error) {
 
 // Unpack decrypts pkt using Cipher and returns a slice of dst containing the decrypted payload and any error occurred.
 // Ensure len(dst) >= len(pkt) - aead.SaltSize() - aead.Overhead().
-func Unpack(dst, pkt []byte, ciph Cipher) ([]byte, error) {
+func Unpack(dst, pkt []byte, ciph internal.ShadowCipher) ([]byte, error) {
 	saltSize := ciph.SaltSize()
 	if len(pkt) < saltSize {
 		return nil, ErrShortPacket
@@ -51,7 +51,7 @@ func Unpack(dst, pkt []byte, ciph Cipher) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if internal.CheckSalt(salt) {
+	if CheckSalt(salt) {
 		return nil, ErrRepeatedSalt
 	}
 	if len(pkt) < saltSize+aead.Overhead() {
@@ -66,25 +66,25 @@ func Unpack(dst, pkt []byte, ciph Cipher) ([]byte, error) {
 
 type packetConn struct {
 	net.PacketConn
-	Cipher
+	internal.ShadowCipher
 	sync.Mutex
 	buf []byte // write lock
 }
 
 // NewPacketConn wraps a net.PacketConn with cipher
-func NewPacketConn(c net.PacketConn, ciph Cipher) net.PacketConn {
+func NewPacketConn(c net.PacketConn, ciph internal.ShadowCipher) net.PacketConn {
 	const maxPacketSize = 64 * 1024
 	if cc, ok := c.(*net.UDPConn); ok {
-		return &udpConn{UDPConn: cc, Cipher: ciph, buf: make([]byte, maxPacketSize)}
+		return &udpConn{UDPConn: cc, ShadowCipher: ciph, buf: make([]byte, maxPacketSize)}
 	}
-	return &packetConn{PacketConn: c, Cipher: ciph, buf: make([]byte, maxPacketSize)}
+	return &packetConn{PacketConn: c, ShadowCipher: ciph, buf: make([]byte, maxPacketSize)}
 }
 
 // WriteTo encrypts b and write to addr using the embedded PacketConn.
 func (c *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	c.Lock()
 	defer c.Unlock()
-	buf, err := Pack(c.buf, b, c)
+	buf, err := Pack(c.buf, b, c.ShadowCipher)
 	if err != nil {
 		return 0, err
 	}
@@ -98,7 +98,7 @@ func (c *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	if err != nil {
 		return n, addr, err
 	}
-	bb, err := Unpack(b[c.Cipher.SaltSize():], b[:n], c)
+	bb, err := Unpack(b[c.ShadowCipher.SaltSize():], b[:n], c.ShadowCipher)
 	if err != nil {
 		return n, addr, err
 	}
@@ -108,7 +108,7 @@ func (c *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 
 type udpConn struct {
 	*net.UDPConn
-	Cipher
+	internal.ShadowCipher
 	sync.Mutex
 	buf []byte // write lock
 }
@@ -117,7 +117,7 @@ type udpConn struct {
 func (c *udpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	c.Lock()
 	defer c.Unlock()
-	buf, err := Pack(c.buf, b, c)
+	buf, err := Pack(c.buf, b, c.ShadowCipher)
 	if err != nil {
 		return 0, err
 	}
@@ -131,7 +131,7 @@ func (c *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	if err != nil {
 		return n, addr, err
 	}
-	bb, err := Unpack(b[c.Cipher.SaltSize():], b[:n], c)
+	bb, err := Unpack(b[c.ShadowCipher.SaltSize():], b[:n], c.ShadowCipher)
 	if err != nil {
 		return n, addr, err
 	}
@@ -143,7 +143,7 @@ func (c *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 func (c *udpConn) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error) {
 	c.Lock()
 	defer c.Unlock()
-	buf, err := Pack(c.buf, b, c)
+	buf, err := Pack(c.buf, b, c.ShadowCipher)
 	if err != nil {
 		return 0, err
 	}
@@ -157,7 +157,7 @@ func (c *udpConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
 	if err != nil {
 		return n, addr, err
 	}
-	bb, err := Unpack(b[c.Cipher.SaltSize():], b[:n], c)
+	bb, err := Unpack(b[c.ShadowCipher.SaltSize():], b[:n], c.ShadowCipher)
 	if err != nil {
 		return n, addr, err
 	}

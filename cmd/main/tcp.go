@@ -2,36 +2,30 @@ package main
 
 import (
 	"bufio"
+	crand "crypto/rand"
 	"errors"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	shadowaead2022 "github.com/shadowsocks/go-shadowsocks2/shadowaead_2022"
 	"github.com/shadowsocks/go-shadowsocks2/socks"
+	"github.com/shadowsocks/go-shadowsocks2/utils"
 )
 
 // Create a SOCKS server listening on addr and proxy to server.
-func socksLocal(addr, server string, shadow func(net.Conn) net.Conn) {
+func socksLocal(ciper, addr, server string, shadow func(net.Conn, int) net.Conn) {
 	logf("SOCKS proxy %s <-> %s", addr, server)
-	tcpLocal(addr, server, shadow, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) })
-}
-
-// Create a TCP tunnel from addr to target via server.
-func tcpTun(addr, server, target string, shadow func(net.Conn) net.Conn) {
-	tgt := socks.ParseAddr(target)
-	if tgt == nil {
-		logf("invalid target address %q", target)
-		return
-	}
-	logf("TCP tunnel %s <-> %s <-> %s", addr, server, target)
-	tcpLocal(addr, server, shadow, func(net.Conn) (socks.Addr, error) { return tgt, nil })
+	tcpLocal(ciper, addr, server, shadow, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) })
 }
 
 // Listen on addr and proxy to server to reach target from getAddr.
-func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(net.Conn) (socks.Addr, error)) {
+func tcpLocal(cipher, addr, server string, shadow func(net.Conn, int) net.Conn, getAddr func(net.Conn) (socks.Addr, error)) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		logf("failed to listen on %s: %v", addr, err)
@@ -77,9 +71,21 @@ func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(
 			if config.TCPCork {
 				rc = timedCork(rc, 10*time.Millisecond, 1280)
 			}
-			rc = shadow(rc)
+			rc = shadow(rc, utils.ROLE_CLIENT)
 
-			if _, err = rc.Write(tgt); err != nil {
+			if strings.HasPrefix(cipher, "2022") {
+				conn2022 := rc.(*shadowaead2022.StreamConn)
+				pad := rand.Intn(shadowaead2022.MaxPaddingLength)
+				padding := make([]byte, pad)
+				_, err := crand.Read(padding)
+				if err != nil {
+					logf("cannot generate padding")
+					return
+				}
+
+				conn2022.InitWrite(tgt, padding, nil)
+
+			} else if _, err = rc.Write(tgt); err != nil {
 				logf("failed to send target address: %v", err)
 				return
 			}
@@ -93,7 +99,7 @@ func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(
 }
 
 // Listen on addr for incoming connections.
-func tcpRemote(addr string, shadow func(net.Conn) net.Conn) {
+func tcpRemote(cipher, addr string, shadow func(net.Conn, int) net.Conn) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		logf("failed to listen on %s: %v", addr, err)
@@ -113,18 +119,29 @@ func tcpRemote(addr string, shadow func(net.Conn) net.Conn) {
 			if config.TCPCork {
 				c = timedCork(c, 10*time.Millisecond, 1280)
 			}
-			sc := shadow(c)
+			sc := shadow(c, utils.ROLE_SERVER)
 
-			tgt, err := socks.ReadAddr(sc)
-			if err != nil {
-				logf("failed to get target address from %v: %v", c.RemoteAddr(), err)
-				// drain c to avoid leaking server behavioral features
-				// see https://www.ndss-symposium.org/ndss-paper/detecting-probe-resistant-proxies/
-				_, err = io.Copy(ioutil.Discard, c)
+			var tgt socks.Addr
+			var err error
+			if strings.HasPrefix(cipher, "2022") {
+				conn2022 := sc.(*shadowaead2022.StreamConn)
+				tgt, err = conn2022.InitRead()
 				if err != nil {
-					logf("discard error: %v", err)
+					logf("failed to get target address from %v: %v", conn2022.RemoteAddr(), err)
+					return
 				}
-				return
+			} else {
+				tgt, err = socks.ReadAddr(sc)
+				if err != nil {
+					logf("failed to get target address from %v: %v", c.RemoteAddr(), err)
+					// drain c to avoid leaking server behavioral features
+					// see https://www.ndss-symposium.org/ndss-paper/detecting-probe-resistant-proxies/
+					_, err = io.Copy(ioutil.Discard, c)
+					if err != nil {
+						logf("discard error: %v", err)
+					}
+					return
+				}
 			}
 
 			rc, err := net.Dial("tcp", tgt.String())
