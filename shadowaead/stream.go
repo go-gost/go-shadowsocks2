@@ -195,7 +195,7 @@ func increment(b []byte) {
 
 type streamConn struct {
 	net.Conn
-	Cipher
+	internal.ShadowCipher
 	r *reader
 	w *writer
 }
@@ -205,12 +205,13 @@ func (c *streamConn) initReader() error {
 	if _, err := io.ReadFull(c.Conn, salt); err != nil {
 		return err
 	}
+
 	aead, err := c.Decrypter(salt)
 	if err != nil {
 		return err
 	}
 
-	if internal.CheckSalt(salt) {
+	if CheckSalt(salt) {
 		return ErrRepeatedSalt
 	}
 
@@ -249,7 +250,7 @@ func (c *streamConn) initWriter() error {
 	if err != nil {
 		return err
 	}
-	internal.AddSalt(salt)
+	AddSalt(salt)
 	c.w = newWriter(c.Conn, aead)
 	return nil
 }
@@ -273,4 +274,6 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 }
 
 // NewConn wraps a stream-oriented net.Conn with cipher.
-func NewConn(c net.Conn, ciph Cipher) net.Conn { return &streamConn{Conn: c, Cipher: ciph} }
+func NewConn(c net.Conn, ciph internal.ShadowCipher) net.Conn {
+	return &streamConn{Conn: c, ShadowCipher: ciph}
+}

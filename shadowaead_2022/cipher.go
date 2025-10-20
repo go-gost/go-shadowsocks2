@@ -1,27 +1,13 @@
-package shadowaead
+package shadowaead2022
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha1"
-	"errors"
-	"io"
-	"net"
-
 	"github.com/shadowsocks/go-shadowsocks2/internal"
+	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/crypto/hkdf"
+	"net"
 )
-
-// ErrRepeatedSalt means detected a reused salt
-var ErrRepeatedSalt = errors.New("repeated salt detected")
-
-func hkdfSHA1(secret, salt, info, outkey []byte) {
-	r := hkdf.New(sha1.New, secret, salt, info)
-	if _, err := io.ReadFull(r, outkey); err != nil {
-		panic(err) // should never happen
-	}
-}
 
 type metaCipher struct {
 	psk      []byte
@@ -30,32 +16,30 @@ type metaCipher struct {
 
 func (a *metaCipher) KeySize() int { return len(a.psk) }
 func (a *metaCipher) SaltSize() int {
-	if ks := a.KeySize(); ks > 16 {
-		return ks
-	}
-	return 16
+	return len(a.psk)
 }
+
 func (a *metaCipher) Encrypter(salt []byte) (cipher.AEAD, error) {
 	subkey := make([]byte, a.KeySize())
-	hkdfSHA1(a.psk, salt, []byte("ss-subkey"), subkey)
+	blake3.DeriveKey("shadowsocks 2022 session subkey", append(a.psk, salt...), subkey)
 	return a.makeAEAD(subkey)
 }
 func (a *metaCipher) Decrypter(salt []byte) (cipher.AEAD, error) {
 	subkey := make([]byte, a.KeySize())
-	hkdfSHA1(a.psk, salt, []byte("ss-subkey"), subkey)
+	blake3.DeriveKey("shadowsocks 2022 session subkey", append(a.psk, salt...), subkey)
 	return a.makeAEAD(subkey)
 }
 
-func (a *metaCipher) StreamConn(c net.Conn, role int) net.Conn { return NewConn(c, a) }
+func (a *metaCipher) StreamConn(c net.Conn, role int) net.Conn { return NewConn(c, a, role) }
 func (a *metaCipher) PacketConn(c net.PacketConn, role int) net.PacketConn {
-	return NewPacketConn(c, a)
+	return NewPacketConn(c, a, a.psk, role)
 }
 
 // AESGCM creates a new Cipher with a pre-shared key. len(psk) must be
-// one of 16, 24, or 32 to select AES-128/196/256-GCM.
+// one of 16, 32 to select AES-128/256-GCM.
 func AESGCM(psk []byte) (internal.ShadowCipher, error) {
 	switch l := len(psk); l {
-	case 16, 24, 32: // AES 128/196/256
+	case 16, 32: // AES 128//256
 	default:
 		return nil, aes.KeySizeError(l)
 	}

@@ -1,4 +1,4 @@
-package internal_test
+package shadowaead_test
 
 import (
 	"fmt"

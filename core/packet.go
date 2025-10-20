@@ -1,8 +1,11 @@
 package core
 
-import "net"
+import (
+	"github.com/shadowsocks/go-shadowsocks2/internal"
+	"net"
+)
 
-func ListenPacket(network, address string, ciph PacketConnCipher) (net.PacketConn, error) {
+func ListenPacket(network, address string, ciph internal.PacketConnCipher) (net.PacketConn, error) {
 	c, err := net.ListenPacket(network, address)
-	return ciph.PacketConn(c), err
+	return ciph.PacketConn(c, 0), err
 }
