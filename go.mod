@@ -1,4 +1,4 @@
-module github.com/shadowsocks/go-shadowsocks2
+module github.com/go-gost/go-shadowsocks2
 
 go 1.23
 

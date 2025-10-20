@@ -1,0 +1,12 @@
+# Compiled executables
+main
+socks5_udp_dns
+socks5_udp_echo
+udp_test_helper
+test_servers
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp

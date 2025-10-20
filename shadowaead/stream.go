@@ -7,7 +7,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/shadowsocks/go-shadowsocks2/internal"
+	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
 // payloadSizeMask is the maximum size of payload in bytes.
@@ -194,19 +195,19 @@ func increment(b []byte) {
 }
 
 type streamConn struct {
-	net.Conn
-	internal.ShadowCipher
+	*net.TCPConn
+	core.ShadowCipher
 	r *reader
 	w *writer
 }
 
 func (c *streamConn) initReader() error {
 	salt := make([]byte, c.SaltSize())
-	if _, err := io.ReadFull(c.Conn, salt); err != nil {
+	if _, err := io.ReadFull(c.TCPConn, salt); err != nil {
 		return err
 	}
 
-	aead, err := c.Decrypter(salt)
+	aead, err := c.Decrypter(nil, salt)
 	if err != nil {
 		return err
 	}
@@ -215,7 +216,7 @@ func (c *streamConn) initReader() error {
 		return ErrRepeatedSalt
 	}
 
-	c.r = newReader(c.Conn, aead)
+	c.r = newReader(c.TCPConn, aead)
 	return nil
 }
 
@@ -242,16 +243,16 @@ func (c *streamConn) initWriter() error {
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return err
 	}
-	aead, err := c.Encrypter(salt)
+	aead, err := c.Encrypter(nil, salt)
 	if err != nil {
 		return err
 	}
-	_, err = c.Conn.Write(salt)
+	_, err = c.TCPConn.Write(salt)
 	if err != nil {
 		return err
 	}
 	AddSalt(salt)
-	c.w = newWriter(c.Conn, aead)
+	c.w = newWriter(c.TCPConn, aead)
 	return nil
 }
 
@@ -273,7 +274,36 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 	return c.w.ReadFrom(r)
 }
 
+func (c *streamConn) InitClient(target socks.Addr, _, _ []byte) error {
+	// Initialize writer (sends salt)
+	if c.w == nil {
+		if err := c.initWriter(); err != nil {
+			return err
+		}
+	}
+
+	// Write target address to encrypted stream
+	_, err := c.w.Write(target)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *streamConn) InitServer() (socks.Addr, error) {
+	// Initialize reader (reads salt and checks for replay)
+	if c.r == nil {
+		if err := c.initReader(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Read target address from encrypted stream
+	return socks.ReadAddr(c.r)
+}
+
 // NewConn wraps a stream-oriented net.Conn with cipher.
-func NewConn(c net.Conn, ciph internal.ShadowCipher) net.Conn {
-	return &streamConn{Conn: c, ShadowCipher: ciph}
+func NewConn(c *net.TCPConn, ciph core.ShadowCipher) core.TCPConn {
+	return &streamConn{TCPConn: c, ShadowCipher: ciph}
 }

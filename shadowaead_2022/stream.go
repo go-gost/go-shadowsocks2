@@ -2,6 +2,7 @@ package shadowaead2022
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
@@ -10,9 +11,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/shadowsocks/go-shadowsocks2/internal"
-	"github.com/shadowsocks/go-shadowsocks2/socks"
-	"github.com/shadowsocks/go-shadowsocks2/utils"
+	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
+	"github.com/zeebo/blake3"
 )
 
 // payloadSizeMask is the maximum size of payload in bytes per SIP022.
@@ -227,7 +228,7 @@ func DecodeResponseFixedLengthHeader(data []byte, saltSize int) (*ResponseFixedL
 type writer struct {
 	io.Writer
 	cipher.AEAD
-	conn       *StreamConn
+	conn       *streamConn
 	nonce      []byte
 	buf        []byte
 	headerSent bool
@@ -274,14 +275,21 @@ func (w *writer) sendClientHeaders() error {
 		return err
 	}
 
+	additionalHeaders, err := w.conn.AdditionalHeaders(w.salt)
+	if err != nil {
+		return err
+	}
 	// Combine salt + encrypted header chunks into one buffer
-	totalLen := len(w.salt) + len(fixedHeaderChunk) + len(variableHeaderChunk)
+	totalLen := len(w.salt) + len(additionalHeaders) + len(fixedHeaderChunk) + len(variableHeaderChunk)
 	combinedBuf := make([]byte, totalLen)
 	pos := 0
 
 	// Copy salt
 	copy(combinedBuf[pos:], w.salt)
 	pos += len(w.salt)
+
+	copy(combinedBuf[pos:], additionalHeaders)
+	pos += len(additionalHeaders)
 
 	// Copy encrypted fixed header chunk
 	copy(combinedBuf[pos:], fixedHeaderChunk)
@@ -393,7 +401,7 @@ func (w *writer) encryptHeaderChunk(data []byte) ([]byte, error) {
 
 	// Directly encrypt header data without length prefix
 	w.Seal(buf[:0], w.nonce, data, nil)
-	increment(w.nonce)
+	core.Increment(w.nonce)
 
 	return buf, nil
 }
@@ -411,13 +419,13 @@ func (w *writer) encryptPayloadChunk(data []byte) ([]byte, error) {
 	// Encrypt length header (2 bytes, big-endian)
 	buf[0], buf[1] = byte(len(data)>>8), byte(len(data))
 	w.Seal(buf[:0], w.nonce, buf[:2], nil)
-	increment(w.nonce)
+	core.Increment(w.nonce)
 
 	// Encrypt payload
 	payloadStart := 2 + w.Overhead()
 	copy(buf[payloadStart:], data)
 	w.Seal(buf[payloadStart:payloadStart], w.nonce, buf[payloadStart:payloadStart+len(data)], nil)
-	increment(w.nonce)
+	core.Increment(w.nonce)
 
 	return buf, nil
 }
@@ -435,7 +443,7 @@ func (w *writer) writeChunk(data []byte) error {
 type reader struct {
 	io.Reader
 	cipher.AEAD
-	conn       *StreamConn
+	conn       *streamConn
 	nonce      []byte
 	buf        []byte
 	leftover   []byte
@@ -468,7 +476,7 @@ func (r *reader) readHeaderChunk(expectedSize int) (int, error) {
 
 	// Decrypt header
 	_, err = r.Open(buf[:0], r.nonce, buf, nil)
-	increment(r.nonce)
+	core.Increment(r.nonce)
 	if err != nil {
 		return 0, err
 	}
@@ -486,7 +494,7 @@ func (r *reader) readPayloadChunk() (int, error) {
 	}
 
 	_, err = r.Open(buf[:0], r.nonce, buf, nil)
-	increment(r.nonce)
+	core.Increment(r.nonce)
 	if err != nil {
 		return 0, err
 	}
@@ -501,7 +509,7 @@ func (r *reader) readPayloadChunk() (int, error) {
 	}
 
 	_, err = r.Open(buf[:0], r.nonce, buf, nil)
-	increment(r.nonce)
+	core.Increment(r.nonce)
 	if err != nil {
 		return 0, err
 	}
@@ -629,39 +637,24 @@ func (r *reader) WriteTo(w io.Writer) (n int64, err error) {
 	return n, err
 }
 
-// increment little-endian encoded unsigned integer b. Wrap around on overflow.
-func increment(b []byte) {
-	for i := range b {
-		b[i]++
-		if b[i] != 0 {
-			return
-		}
-	}
-}
-
-type StreamConn struct {
-	net.Conn
-	internal.ShadowCipher
+type streamConn struct {
+	*net.TCPConn
+	core.ShadowCipher
 	r              *reader
 	w              *writer
 	isServer       bool
 	variableHeader *VariableLengthHeader
 	fixedHeader    *FixedLengthHeader
-	clientSalt     []byte // Store client salt at connection level
+	clientSalt     []byte                  // Store client salt at connection level
+	userTable      map[core.EIHHash]string // Extensible Identity Headers, for server
+	key            []byte                  // key for encryption and decryption
 }
 
-func (c *StreamConn) initReader() error {
+func (c *streamConn) loadSalt() error {
 	salt := make([]byte, c.SaltSize())
-	if _, err := io.ReadFull(c.Conn, salt); err != nil {
+	if _, err := io.ReadFull(c.TCPConn, salt); err != nil {
 		return err
 	}
-	aead, err := c.Decrypter(salt)
-	if err != nil {
-		return err
-	}
-
-	c.r = newReader(c.Conn, aead, c.SaltSize())
-	c.r.conn = c
 
 	// Store client salt at connection level (always safe)
 	c.clientSalt = make([]byte, len(salt))
@@ -670,7 +663,26 @@ func (c *StreamConn) initReader() error {
 	return nil
 }
 
-func (c *StreamConn) Read(b []byte) (int, error) {
+func (c *streamConn) initReader() error {
+	if len(c.clientSalt) == 0 {
+		err := c.loadSalt()
+		if err != nil {
+			return err
+		}
+	}
+
+	aead, err := c.Decrypter(c.key, c.clientSalt)
+	if err != nil {
+		return err
+	}
+
+	c.r = newReader(c.TCPConn, aead, c.SaltSize())
+	c.r.conn = c
+
+	return nil
+}
+
+func (c *streamConn) Read(b []byte) (int, error) {
 	if c.r == nil {
 		if err := c.initReader(); err != nil {
 			return 0, err
@@ -679,7 +691,7 @@ func (c *StreamConn) Read(b []byte) (int, error) {
 	return c.r.Read(b)
 }
 
-func (c *StreamConn) WriteTo(w io.Writer) (int64, error) {
+func (c *streamConn) WriteTo(w io.Writer) (int64, error) {
 	if c.r == nil {
 		if err := c.initReader(); err != nil {
 			return 0, err
@@ -688,17 +700,17 @@ func (c *StreamConn) WriteTo(w io.Writer) (int64, error) {
 	return c.r.WriteTo(w)
 }
 
-func (c *StreamConn) initWriter() error {
+func (c *streamConn) initWriter() error {
 	salt := make([]byte, c.SaltSize())
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return err
 	}
-	aead, err := c.Encrypter(salt)
+	aead, err := c.Encrypter(c.key, salt)
 	if err != nil {
 		return err
 	}
 
-	c.w = newWriter(c.Conn, aead)
+	c.w = newWriter(c.TCPConn, aead)
 	c.w.salt = salt
 	c.w.conn = c
 
@@ -712,12 +724,12 @@ func (c *StreamConn) initWriter() error {
 
 // SetVariableHeader sets the variable header for the connection
 // Fixed header will be generated automatically when needed
-func (c *StreamConn) SetVariableHeader(variable *VariableLengthHeader) error {
+func (c *streamConn) SetVariableHeader(variable *VariableLengthHeader) error {
 	c.variableHeader = variable
 	return nil
 }
 
-func (c *StreamConn) validateHeaders() error {
+func (c *streamConn) validateHeaders() error {
 	if c.fixedHeader == nil || c.variableHeader == nil {
 		return errors.New("no header received")
 	}
@@ -734,45 +746,84 @@ func (c *StreamConn) validateHeaders() error {
 	return nil
 }
 
-// InitRead will read salt + fixed length header + variable length header from first packet of connection
+// InitServer will read salt + Extensible Identity Headers + fixed length header + variable length header from first packet of connection
 // Btw, header validating also be applied
-func (c *StreamConn) InitRead() (socks.Addr, error) {
+func (c *streamConn) InitServer() (socks.Addr, error) {
+	var err error
+
 	if !c.isServer {
 		return nil, nil
 	}
 
-	var err error
-	if c.variableHeader == nil {
-		if c.r == nil {
-			err = c.initReader()
+	defer func() {
+		if err != nil {
+			conn := c.TCPConn
+			// This defends against probes that send one byte at a time to detect
+			// how many bytes the server consumes before closing the connection.
+			conn.CloseWrite()
 		}
+	}()
 
-		if err == nil {
-			if !CheckSalt(c.clientSalt) {
-				return nil, ErrRepeatedSalt
-			}
-
-			err = c.r.readHeaders()
-		}
-	}
-
-	if err == nil {
-		err = c.validateHeaders()
-	}
-
+	err = c.loadSalt()
 	if err != nil {
-		conn := c.Conn.(*net.TCPConn)
-		// This defends against probes that send one byte at a time to detect
-		// how many bytes the server consumes before closing the connection.
-		conn.CloseWrite()
+		return nil, err
+	}
 
+	// validate Extensible Identity Headers
+	if c.IsMultiUser() {
+		subkey := make([]byte, c.KeySize())
+		userPskHash := make([]byte, 16)
+		if _, err = io.ReadFull(c.TCPConn, userPskHash); err != nil {
+			return nil, err
+		}
+
+		blake3.DeriveKey("shadowsocks 2022 identity subkey", append(c.Key(), c.clientSalt...), subkey)
+		var aesCipher cipher.Block
+		aesCipher, err = aes.NewCipher(subkey)
+		if err != nil {
+			return nil, err
+		}
+
+		aesCipher.Decrypt(userPskHash, userPskHash)
+		if password, ok := c.userTable[core.EIHHash(userPskHash)]; !ok {
+			return nil, errors.New("no such user")
+		} else {
+			var k []byte
+			k, err = core.Base64Decode(password)
+			if err != nil {
+				return nil, err
+			}
+			c.key = k
+		}
+	}
+
+	if c.r == nil {
+		if err = c.initReader(); err != nil {
+			return nil, err
+		}
+	}
+
+	if c.variableHeader == nil {
+		if !CheckSalt(c.clientSalt) {
+			err = ErrRepeatedSalt
+			return nil, err
+		}
+
+		err = c.r.readHeaders()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = c.validateHeaders()
+	if err != nil {
 		return nil, err
 	}
 
 	return c.variableHeader.Addr, nil
 }
 
-func (c *StreamConn) InitWrite(target socks.Addr, padding, initialPayload []byte) error {
+func (c *streamConn) InitClient(target socks.Addr, padding, initialPayload []byte) error {
 	if c.isServer {
 		return nil
 	}
@@ -791,7 +842,7 @@ func (c *StreamConn) InitWrite(target socks.Addr, padding, initialPayload []byte
 	return nil
 }
 
-func (c *StreamConn) Write(b []byte) (int, error) {
+func (c *streamConn) Write(b []byte) (int, error) {
 	if c.w == nil {
 		if err := c.initWriter(); err != nil {
 			return 0, err
@@ -800,7 +851,7 @@ func (c *StreamConn) Write(b []byte) (int, error) {
 	return c.w.Write(b)
 }
 
-func (c *StreamConn) ReadFrom(r io.Reader) (int64, error) {
+func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 	if c.w == nil {
 		if err := c.initWriter(); err != nil {
 			return 0, err
@@ -809,7 +860,37 @@ func (c *StreamConn) ReadFrom(r io.Reader) (int64, error) {
 	return c.w.ReadFrom(r)
 }
 
+// Generate Extensible Identity Headers
+func (c *streamConn) AdditionalHeaders(salt []byte) ([]byte, error) {
+	psks := c.Keys()
+	n := len(psks)
+	r := []byte{}
+	subkey := make([]byte, c.KeySize())
+	for i := range n - 1 {
+		key := psks[i]
+		nextKey := psks[i+1]
+		blake3.DeriveKey("shadowsocks 2022 identity subkey", append(key, salt...), subkey)
+		nextKeyHash := blake3.Sum256(nextKey)
+		buf := nextKeyHash[:16]
+		c, err := aes.NewCipher(subkey)
+		if err != nil {
+			return nil, err
+		}
+
+		c.Encrypt(buf, buf)
+		r = append(r, buf...)
+	}
+
+	return r, nil
+}
+
+func (c *streamConn) IsMultiUser() bool {
+	return c.userTable != nil
+}
+
 // NewConn wraps a stream-oriented net.Conn with cipher.
-func NewConn(c net.Conn, ciph internal.ShadowCipher, role int) net.Conn {
-	return &StreamConn{Conn: c, ShadowCipher: ciph, isServer: role == utils.ROLE_SERVER}
+func NewConn(c *net.TCPConn, ciph core.ShadowCipher, config core.TCPConfig, role int) core.TCPConn {
+	table := core.UsersToEIHHash(config.Users)
+
+	return &streamConn{TCPConn: c, userTable: table, key: ciph.Key(), ShadowCipher: ciph, isServer: role == core.ROLE_SERVER}
 }
