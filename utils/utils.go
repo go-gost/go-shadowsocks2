@@ -4,7 +4,6 @@ import (
 	crand "crypto/rand"
 	"errors"
 	"math/rand"
-	"net/netip"
 	"strings"
 
 	"github.com/go-gost/go-shadowsocks2/core"
@@ -86,7 +85,7 @@ func PickCipher(name string, password string) (core.ShadowCipher, error) {
 	return choice.New(choice.meta, password)
 }
 
-func NewServerConfig(method, password string, addr netip.AddrPort, users []core.UserConfig) (core.ServerConfig, error) {
+func NewServerConfig(method, password string, users []core.UserConfig) (core.ServerConfig, error) {
 	cipher, err := PickCipher(method, password)
 	if err != nil {
 		return core.ServerConfig{}, err
@@ -95,13 +94,12 @@ func NewServerConfig(method, password string, addr netip.AddrPort, users []core.
 	config := core.ServerConfig{
 		Cipher: cipher,
 		Users:  users,
-		Addr:   addr,
 	}
 
 	return config, nil
 }
 
-func NewClientConfig(method, password string, server netip.AddrPort) (core.ClientConfig, error) {
+func NewClientConfig(method, password string) (core.ClientConfig, error) {
 	cipher, err := PickCipher(method, password)
 	if err != nil {
 		return core.ClientConfig{}, err
@@ -109,7 +107,6 @@ func NewClientConfig(method, password string, server netip.AddrPort) (core.Clien
 
 	config := core.ClientConfig{
 		Cipher: cipher,
-		Server: server,
 	}
 
 	return config, nil

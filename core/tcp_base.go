@@ -14,8 +14,9 @@ type TCPConfig struct {
 type TCPConn interface {
 	net.Conn
 
-	InitServer() (socks.Addr, error)                                    // for server side
+	InitServer() error                                                  // for server side
 	InitClient(target socks.Addr, padding, initialPayload []byte) error // for client side
+	Target() socks.Addr
 }
 
 type TCPConnCipher interface {

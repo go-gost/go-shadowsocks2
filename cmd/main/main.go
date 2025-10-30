@@ -66,8 +66,6 @@ func main() {
 	flag.DurationVar(&config.UDPTimeout, "udptimeout", 5*time.Minute, "UDP tunnel timeout")
 	flag.Parse()
 
-	core.SetLogger(logf)
-
 	if flags.Client == "" && flags.Server == "" {
 		flag.Usage()
 		return
@@ -96,14 +94,16 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		clientConfig, err := utils.NewClientConfig(cipher, password, serverAddr)
+		clientConfig, err := utils.NewClientConfig(cipher, password)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		go socksLocal(flags.Socks, clientConfig)
+		laddr, _ := netip.ParseAddrPort(flags.Socks)
+
+		go socksLocal(laddr, serverAddr, clientConfig)
 		if flags.UDP {
-			go udpSocksLocal(flags.Socks, clientConfig)
+			go udpSocksLocal(laddr, serverAddr, clientConfig)
 		}
 	}
 
@@ -129,15 +129,15 @@ func main() {
 			log.Fatal(err)
 		}
 
-		serverConfig, err := utils.NewServerConfig(cipher, password, serverAddr, flags.users)
+		serverConfig, err := utils.NewServerConfig(cipher, password, flags.users)
 		if err != nil {
 			log.Fatal(err)
 		}
 		if flags.UDP {
-			go udpRemote(serverConfig)
+			go udpRemote(serverAddr, serverConfig)
 		}
 		if flags.TCP {
-			go tcpRemote(serverConfig)
+			go tcpRemote(serverAddr, serverConfig)
 		}
 	}
 

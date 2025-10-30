@@ -73,17 +73,15 @@ func (m *UDPSessionManager) SetServerConn(conn *net.UDPConn) {
 // 1. Decrypt separate header (AES) to get session ID + packet ID
 // 2. Validate session: anti-replay + NAT rebinding
 // 3. Decrypt main body (AEAD) to get target address + payload
-// 4. Get or create outbound connection for this session
-// 5. Forward payload to target
-func (m *UDPSessionManager) ServerHandleReceive(encrypted []byte, clientAddr netip.AddrPort) (core.UDPSession, error) {
+func (m *UDPSessionManager) ServerHandleInbound(encrypted []byte, clientAddr netip.AddrPort) (core.UDPSession, []byte, error) {
 	if len(encrypted) < 16 {
-		return nil, ErrShortPacket
+		return nil, nil, ErrShortPacket
 	}
 
 	// Decrypt separate header with AES
 	separateHeader, header, payload, key, err := UnpackUDP(m.cipher, m.userTable, encrypted)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Validate session: get-or-create + anti-replay + update client address
@@ -94,7 +92,7 @@ func (m *UDPSessionManager) ServerHandleReceive(encrypted []byte, clientAddr net
 		key,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	session.Touch()
 
@@ -102,39 +100,14 @@ func (m *UDPSessionManager) ServerHandleReceive(encrypted []byte, clientAddr net
 
 	session.SetTarget(target)
 
-	// Get or create outbound connection atomically
-	conn := session.Conn()
-	if conn == nil {
-		conn, err = m.BuildConn(core.UDPConfig{})
-		if err != nil {
-			return nil, err
-		}
-	}
-	session.SetConn(conn)
-
-	// Resolve target and forward payload
-	targetAddr, err := net.ResolveUDPAddr("udp", target.String())
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = conn.WriteTo(payload, targetAddr)
-	return session, err
+	return session, payload, err
 }
 
 // UDP protocol: session ID + packet counter + target address.
-func (m *UDPSessionManager) ServerHandleReturn(udpSession core.UDPSession) ([]byte, error) {
+func (m *UDPSessionManager) ServerHandleOutbound(plaintext []byte, udpSession core.UDPSession) ([]byte, error) {
 	session := udpSession.(*ServerSession)
-	conn := session.Conn()
 
-	buf := make([]byte, 64*1024)
-	conn.SetReadDeadline(time.Now().Add(m.timeout))
-	n, _, err := conn.ReadFromUDPAddrPort(buf)
-	if err != nil {
-		return nil, err
-	}
-
-	encrypted, err := PackUDP(m.cipher, false, session.Key(), session.Key(), buf[:n], session.Target(), session.ServerSessionID(), session.GetNextPacketID(), session.ClientSessionID())
+	encrypted, err := PackUDP(m.cipher, false, session.Key(), session.Key(), plaintext, session.Target(), session.SessionID(), session.GetNextPacketID(), session.ClientSessionID())
 	if err != nil {
 		return nil, err
 	}
@@ -144,45 +117,24 @@ func (m *UDPSessionManager) ServerHandleReturn(udpSession core.UDPSession) ([]by
 	return encrypted, nil
 }
 
-func (m *UDPSessionManager) ClientHandleReceive(payload []byte, target socks.Addr, clientAddr netip.AddrPort, serverAddr netip.AddrPort) (core.UDPSession, error) {
+func (m *UDPSessionManager) ClientHandleInbound(payload []byte, target socks.Addr, clientAddr netip.AddrPort) (core.UDPSession, []byte, error) {
 	session := m.clientSessionMgr.GetOrCreate(clientAddr, target)
-	conn := session.Conn()
-	var err error
-	if conn == nil {
-		conn, err = m.BuildConn(core.UDPConfig{})
-		if err != nil {
-			return nil, err
-		}
-		session.SetConn(conn)
-	}
 
 	eih := len(m.cipher.Keys()) > 1
 	encrypted, err := PackUDP(m.cipher, eih, m.cipher.FirstKey(), m.cipher.Key(), payload, target, session.SessionID(), session.GetNextPacketID(), 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	session.Touch()
 
-	_, err = conn.WriteToUDPAddrPort(encrypted, serverAddr)
-	if err != nil {
-		return nil, err
-	}
-	return session, nil
+	return session, encrypted, nil
 }
 
-func (m *UDPSessionManager) ClientHandleReturn(udpSession core.UDPSession) ([]byte, error) {
+func (m *UDPSessionManager) ClientHandleOutbound(encrypted []byte, udpSession core.UDPSession) ([]byte, error) {
 	session := udpSession.(*ClientSession)
 
-	conn := session.Conn()
-
-	buf := make([]byte, 64*1024)
-	conn.SetReadDeadline(time.Now().Add(m.timeout))
-	n, _, err := conn.ReadFromUDPAddrPort(buf)
-	if err != nil {
-		return nil, err
-	}
-	_, _, payload, _, err := UnpackUDP(m.cipher, nil, buf[:n])
+	_, _, payload, _, err := UnpackUDP(m.cipher, nil, encrypted)
 	if err != nil {
 		return nil, err
 	}
@@ -190,15 +142,6 @@ func (m *UDPSessionManager) ClientHandleReturn(udpSession core.UDPSession) ([]by
 	session.Touch()
 
 	return payload, nil
-}
-
-func (m *UDPSessionManager) BuildConn(config core.UDPConfig) (core.UDPConn, error) {
-	conn, err := net.ListenUDP("udp", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return conn, nil
 }
 
 // Generate Extensible Identity Headers

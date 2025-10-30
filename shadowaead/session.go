@@ -1,6 +1,7 @@
 package shadowaead
 
 import (
+	"fmt"
 	"net/netip"
 	"sync/atomic"
 	"time"
@@ -14,7 +15,6 @@ import (
 type aeadSession struct {
 	target     socks.Addr
 	clientAddr netip.AddrPort
-	conn       core.UDPConn
 	lastUsed   atomic.Int64
 	returning  atomic.Bool
 }
@@ -39,14 +39,12 @@ func (s *aeadSession) ClientAddr() netip.AddrPort {
 	return s.clientAddr
 }
 
-// Conn returns the outbound connection for this session.
-func (s *aeadSession) Conn() core.UDPConn {
-	return s.conn
+func (s *aeadSession) SessionID() uint64 {
+	return 0
 }
 
-// Conn returns the outbound connection for this session.
-func (s *aeadSession) SetConn(conn core.UDPConn) {
-	s.conn = conn
+func (s *aeadSession) Hash() core.SessionHash {
+	return core.SessionHash(fmt.Sprintf("%v-%v", "aead", s.clientAddr))
 }
 
 // LastUsed returns when this session was last used.
@@ -62,14 +60,6 @@ func (s *aeadSession) Returning() bool {
 // Return sets the returning status.
 func (s *aeadSession) Return(running bool) {
 	s.returning.Store(running)
-}
-
-// Close closes the session and its connection.
-func (s *aeadSession) Close() error {
-	if s.conn != nil {
-		return s.conn.Close()
-	}
-	return nil
 }
 
 // touch updates the last used timestamp.

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -34,11 +35,9 @@ type ServerSession struct {
 	clientAddr      netip.AddrPort // Last seen client address (updates on NAT change)
 	replayFilter    *SlidingWindow // Anti-replay protection
 	target          socks.Addr     // Current target address
-	conn            core.UDPConn   // Outbound connection to target
 	lastUsed        atomic.Int64   // Last time we received a packet
-	returning       atomic.Bool
-	key             []byte       // key for encryption
-	mu              sync.RWMutex // Protects mutable fields
+	key             []byte         // key for encryption
+	mu              sync.RWMutex   // Protects mutable fields
 }
 
 // NewServerSession creates a new server session for a client session ID.
@@ -94,6 +93,10 @@ func (s *ServerSession) ClientAddr() netip.AddrPort {
 	return s.clientAddr
 }
 
+func (s *ServerSession) Hash() core.SessionHash {
+	return core.SessionHash(fmt.Sprintf("%v-%v", 2022, s.SessionID()))
+}
+
 // GetNextPacketID returns the next packet ID for server responses.
 func (s *ServerSession) GetNextPacketID() uint64 {
 	s.mu.Lock()
@@ -114,7 +117,7 @@ func (s *ServerSession) ClientSessionID() uint64 {
 }
 
 // ServerSessionID returns the server's session ID.
-func (s *ServerSession) ServerSessionID() uint64 {
+func (s *ServerSession) SessionID() uint64 {
 	return s.serverSessionID
 }
 
@@ -133,42 +136,9 @@ func (s *ServerSession) Target() socks.Addr {
 	return s.target
 }
 
-func (s *ServerSession) Return(b bool) {
-	s.returning.Store(b)
-}
-
-func (s *ServerSession) Returning() bool {
-	return s.returning.Load()
-}
-
-// GetConn returns the outbound connection.
-func (s *ServerSession) Conn() core.UDPConn {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.conn
-}
-
-func (s *ServerSession) SetConn(conn core.UDPConn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.conn = conn
-}
-
 // LastSeen returns when this session last received a packet.
 func (s *ServerSession) LastUsed() time.Time {
 	return time.Unix(s.lastUsed.Load(), 0)
-}
-
-// Close closes the outbound connection.
-func (s *ServerSession) Close() error {
-	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
-
-	if conn != nil {
-		return conn.Close()
-	}
-	return nil
 }
 
 // ServerSessionManager manages UDP relay sessions on the server side.
@@ -252,15 +222,11 @@ func (m *ServerSessionManager) ValidatePacket(clientSessionID, packetID uint64, 
 // Delete removes a session and closes its connection.
 func (m *ServerSessionManager) Delete(clientSessionID uint64) {
 	m.mu.Lock()
-	session, exists := m.sessions[clientSessionID]
+	_, exists := m.sessions[clientSessionID]
 	if exists {
 		delete(m.sessions, clientSessionID)
 	}
 	m.mu.Unlock()
-
-	if exists && session != nil {
-		session.Close()
-	}
 }
 
 // cleanupLoop runs in the background to remove expired sessions.
@@ -292,11 +258,6 @@ func (m *ServerSessionManager) cleanup() {
 		}
 	}
 	m.mu.Unlock()
-
-	// Close connections outside the lock
-	for _, session := range toClose {
-		session.Close()
-	}
 }
 
 // Close stops the cleanup loop and closes all sessions.
@@ -306,9 +267,6 @@ func (m *ServerSessionManager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, session := range m.sessions {
-		session.Close()
-	}
 	m.sessions = make(map[uint64]*ServerSession)
 
 	return nil

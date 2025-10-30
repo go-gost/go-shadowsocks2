@@ -3,6 +3,7 @@ package shadowaead2022
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -23,10 +24,8 @@ type ClientSession struct {
 	sessionID  uint64        // Randomly generated 8-byte session ID
 	packetID   atomic.Uint64 // Monotonically increasing packet counter
 	target     socks.Addr    // Target address this session is relaying to
-	conn       core.UDPConn  // Outbound connection for this session
 	lastUsed   atomic.Int64  // Last time this session was used (for timeout cleanup)
 	clientAddr netip.AddrPort
-	returning  atomic.Bool
 	mu         sync.RWMutex
 }
 
@@ -70,19 +69,8 @@ func (s *ClientSession) Target() socks.Addr {
 	return s.target
 }
 
-// Conn returns the outbound connection for this session.
-func (s *ClientSession) Conn() core.UDPConn {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	return s.conn
-}
-
-func (s *ClientSession) SetConn(conn core.UDPConn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.conn = conn
+func (s *ClientSession) Hash() core.SessionHash {
+	return core.SessionHash(fmt.Sprintf("%v-%v", 2022, s.ClientAddr()))
 }
 
 // LastUsed returns when this session was last used.
@@ -90,25 +78,8 @@ func (s *ClientSession) LastUsed() time.Time {
 	return time.Unix(s.lastUsed.Load(), 0)
 }
 
-func (s *ClientSession) Return(b bool) {
-	s.returning.Store(b)
-}
-
-func (s *ClientSession) Returning() bool {
-	return s.returning.Load()
-}
-
 func (s *ClientSession) Touch() {
 	s.lastUsed.Store(time.Now().Unix())
-}
-
-// Close closes the outbound connection.
-func (s *ClientSession) Close() error {
-	if s.conn != nil {
-		return s.conn.Close()
-	}
-
-	return nil
 }
 
 // ClientSessionManager manages UDP relay sessions on the client side.
@@ -171,15 +142,11 @@ func (m *ClientSessionManager) GetOrCreate(sourceAddr netip.AddrPort, target soc
 // Delete removes a session and closes its connection.
 func (m *ClientSessionManager) Delete(sourceAddr netip.AddrPort) {
 	m.mu.Lock()
-	session, exists := m.sessions[sourceAddr]
+	_, exists := m.sessions[sourceAddr]
 	if exists {
 		delete(m.sessions, sourceAddr)
 	}
 	m.mu.Unlock()
-
-	if exists && session != nil {
-		session.Close()
-	}
 }
 
 // cleanupLoop runs in the background to remove expired sessions.
@@ -210,11 +177,6 @@ func (m *ClientSessionManager) cleanup() {
 		}
 	}
 	m.mu.Unlock()
-
-	// Close connections outside the lock
-	for _, session := range toClose {
-		session.Close()
-	}
 }
 
 // Close stops the cleanup loop and closes all sessions.
@@ -224,9 +186,6 @@ func (m *ClientSessionManager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, session := range m.sessions {
-		session.Close()
-	}
 	m.sessions = make(map[netip.AddrPort]*ClientSession)
 
 	return nil

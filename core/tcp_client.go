@@ -2,6 +2,7 @@ package core
 
 import (
 	"net"
+	"net/netip"
 
 	"github.com/go-gost/go-shadowsocks2/socks"
 )
@@ -16,8 +17,8 @@ func NewTCPClient(config ClientConfig) TCPClient {
 	}
 }
 
-func (c *TCPClient) Dial(target socks.Addr, padding, initialPayload []byte) (TCPConn, error) {
-	tcpConn, err := net.DialTCP("tcp", nil, net.TCPAddrFromAddrPort(c.config.Server))
+func (c *TCPClient) Dial(target socks.Addr, server netip.AddrPort, padding, initialPayload []byte) (TCPConn, error) {
+	tcpConn, err := net.DialTCP("tcp", nil, net.TCPAddrFromAddrPort(server))
 	if err != nil {
 		return nil, err
 	}
