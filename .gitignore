@@ -1,7 +1,5 @@
 .claude
-go-shadowsocks2
 CLAUDE.md
 build
 main
-test-udp-client
 .envrc

@@ -4,6 +4,7 @@ package socks
 import (
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 )
 
@@ -50,8 +51,7 @@ const MaxAddrLen = 1 + 1 + 255 + 2
 // Addr represents a SOCKS address as defined in RFC 1928 section 5.
 type Addr []byte
 
-// String serializes SOCKS address a to string form.
-func (a Addr) String() string {
+func (a Addr) parse() (string, string) {
 	var host, port string
 
 	switch a[0] { // address type
@@ -66,7 +66,23 @@ func (a Addr) String() string {
 		port = strconv.Itoa((int(a[1+net.IPv6len]) << 8) | int(a[1+net.IPv6len+1]))
 	}
 
+	return host, port
+}
+
+// String serializes SOCKS address a to string form.
+func (a Addr) String() string {
+	host, port := a.parse()
 	return net.JoinHostPort(host, port)
+}
+
+func (a Addr) ToAddrPort() (netip.AddrPort, error) {
+
+	addr, err := netip.ParseAddrPort(a.String())
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+
+	return addr, nil
 }
 
 func readAddr(r io.Reader, b []byte) (Addr, error) {

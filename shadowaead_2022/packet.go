@@ -5,16 +5,11 @@ import (
 	crand "crypto/rand"
 	"encoding/binary"
 	"errors"
-	"io"
 	"math/rand"
-	"net"
-	"net/netip"
-	"sync"
 	"time"
 
-	"github.com/shadowsocks/go-shadowsocks2/internal"
-	"github.com/shadowsocks/go-shadowsocks2/socks"
-	"github.com/shadowsocks/go-shadowsocks2/utils"
+	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
 // ErrShortPacket means that the packet is too short for a valid encrypted packet.
@@ -207,7 +202,7 @@ func encryptSeparateHeaderAES(header *SeparateHeader, psk []byte) ([]byte, error
 }
 
 // decryptSeparateHeaderAES decrypts separate header using AES block cipher with PSK
-func decryptSeparateHeaderAES(encrypted []byte, psk []byte) (*SeparateHeader, error) {
+func decryptSeparateHeaderAES(encrypted []byte, psk []byte) ([]byte, error) {
 	if len(encrypted) != 16 {
 		return nil, ErrShortPacket
 	}
@@ -222,38 +217,17 @@ func decryptSeparateHeaderAES(encrypted []byte, psk []byte) (*SeparateHeader, er
 	decrypted := make([]byte, 16)
 	block.Decrypt(decrypted, encrypted)
 
-	return DecodeSeparateHeader(decrypted)
+	return decrypted, nil
 }
 
 // PackUDP encrypts plaintext using SIP022 UDP format (both request and response)
 // Format: AES(separate_header) + AEAD(body)
-// serverSession: optional, for server responses. If nil, uses c.session (client mode)
-func (c *PacketConn) PackUDP(dst, plaintext []byte, serverSession *ServerSession) ([]byte, error) {
-	var sessionID, packetID uint64
-	var target socks.Addr
-	var clientSessionID uint64
-
-	if serverSession != nil {
-		// Server mode: use ServerSession
-		sessionID = serverSession.ServerSessionID()
-		packetID = serverSession.GetNextPacketID()
-		target = serverSession.GetTarget()
-		clientSessionID = serverSession.ClientSessionID()
-	} else {
-		// Client mode: use ClientSession
-		if c.session == nil {
-			return nil, errors.New("no session set")
-		}
-		sessionID = c.session.SessionID()
-		packetID = c.session.GetNextPacketID()
-		target = c.session.Target()
-	}
-
+func PackUDP(c core.ShadowCipher, eih bool, separateHeaderKey, bodyKey []byte, payload []byte, target socks.Addr, sessionID, packetID, clientSessionID uint64) ([]byte, error) {
 	salt := make([]byte, 8)
 	binary.LittleEndian.PutUint64(salt, sessionID)
 
 	// Derive session subkey from salt for AEAD
-	aead, err := c.Encrypter(salt)
+	aead, err := c.Encrypter(bodyKey, salt)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +240,7 @@ func (c *PacketConn) PackUDP(dst, plaintext []byte, serverSession *ServerSession
 	separateHeaderEncoding := EncodeSeparateHeader(separateHeader)
 
 	// Encrypt separate header with AES using PSK
-	encryptedSeparateHeader, err := encryptSeparateHeaderAES(separateHeader, c.psk)
+	encryptedSeparateHeader, err := encryptSeparateHeaderAES(separateHeader, separateHeaderKey)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +253,7 @@ func (c *PacketConn) PackUDP(dst, plaintext []byte, serverSession *ServerSession
 	}
 
 	var headerType byte
-	if serverSession != nil {
+	if clientSessionID != 0 {
 		headerType = HeaderTypeServerStream
 	} else {
 		headerType = HeaderTypeClientStream
@@ -298,22 +272,34 @@ func (c *PacketConn) PackUDP(dst, plaintext []byte, serverSession *ServerSession
 	mainHeader := EncodeUDPHeader(header)
 
 	// Combine main header + payload as body
-	body := make([]byte, len(mainHeader)+len(plaintext))
+	body := make([]byte, len(mainHeader)+len(payload))
 	copy(body, mainHeader)
-	copy(body[len(mainHeader):], plaintext)
+	copy(body[len(mainHeader):], payload)
 
 	// Encrypt body with AEAD
 	encryptedBody := aead.Seal(nil, separateHeaderEncoding[4:], body, nil)
 
-	// Combine: encrypted_separate_header + encrypted_body
-	totalSize := 16 + len(encryptedBody)
-	if len(dst) < totalSize {
-		return nil, io.ErrShortBuffer
+	var addtionalHeaders []byte
+	if eih {
+		addtionalHeaders, err = AdditionalHeaders(c, separateHeaderEncoding)
+		if err != nil {
+			return nil, err
+		}
 	}
+
+	// Combine: encrypted_separate_header + encrypted_body
+	totalSize := 16 + len(encryptedBody) + len(addtionalHeaders)
+	dst := make([]byte, totalSize)
 
 	pos := 0
 	copy(dst[pos:], encryptedSeparateHeader)
 	pos += 16
+
+	if eih {
+		copy(dst[pos:], addtionalHeaders)
+		pos += len(addtionalHeaders)
+	}
+
 	copy(dst[pos:], encryptedBody)
 
 	return dst[:totalSize], nil
@@ -321,41 +307,80 @@ func (c *PacketConn) PackUDP(dst, plaintext []byte, serverSession *ServerSession
 
 // UnpackUDP decrypts pkt using SIP022 UDP format (both request and response)
 // Format: AES(separate_header) + AEAD(body)
-// Returns: (header, payload, sessionID, error)
-func (c *PacketConn) UnpackUDP(dst, pkt []byte) (*SeparateHeader, *UDPHeader, []byte, error) {
+// Returns: (header, payload, sessionID, key for decryption, error)
+//
+// The workflow:
+// 1. decrypt separateHeader. For server, use the first key of ciph. For client, use the last key of ciph
+// 2. decrypt Extensible Identity Headers if userTable is not nil
+// 3. decrypt body. For server, use the key from EIH. For client, use the last key of ciph
+// NOTE: For server, there is only one key in the ciph
+func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]string, encrypted []byte) (*SeparateHeader, *UDPHeader, []byte, []byte, error) {
 	// Decrypt separate header with AES using PSK
-	encryptedSeparateHeader := pkt[:16]
-	separateHeader, err := decryptSeparateHeaderAES(encryptedSeparateHeader, c.psk)
+	pos := 0
+	decryptKey := ciph.Key()
+
+	encryptedSeparateHeader := encrypted[:16]
+	separateHeaderEncoding, err := decryptSeparateHeaderAES(encryptedSeparateHeader, ciph.Key())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	separateHeaderEncoding := EncodeSeparateHeader(separateHeader)
-	dst = append(dst, separateHeaderEncoding...)
+	pos += 16
+	separateHeader, err := DecodeSeparateHeader(separateHeaderEncoding)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	// validate Extensible Identity Headers
+	if userTable != nil {
+		aesKey, err := aes.NewCipher(ciph.Key())
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+
+		nextKeyHash := make([]byte, 16)
+		aesKey.Decrypt(nextKeyHash, encrypted[pos:pos+16])
+		nextKeyHash, err = core.XORBytes(nextKeyHash, separateHeaderEncoding)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+
+		if password, ok := userTable[core.EIHHash(nextKeyHash)]; !ok {
+			return nil, nil, nil, nil, errors.New("no such user")
+		} else {
+			k, err := core.Base64Decode(password)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+
+			decryptKey = k
+		}
+		pos += 16
+	}
 
 	salt := make([]byte, 8)
 	binary.LittleEndian.PutUint64(salt, separateHeader.SessionID)
 
 	// Derive session subkey from salt for AEAD
-	aead, err := c.Decrypter(salt)
+	aead, err := ciph.Decrypter(decryptKey, salt)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Decrypt body with AEAD
-	encryptedBody := pkt[16:]
+	encryptedBody := encrypted[pos:]
 	if len(encryptedBody) < aead.Overhead() {
-		return nil, nil, nil, ErrShortPacket
+		return nil, nil, nil, nil, ErrShortPacket
 	}
 
 	body, err := aead.Open(encryptedBody[:0], separateHeaderEncoding[4:], encryptedBody, nil)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Parse main header from body
 	header, err := DecodeUDPHeader(body)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Extract payload (everything after main header)
@@ -366,232 +391,9 @@ func (c *PacketConn) UnpackUDP(dst, pkt []byte) (*SeparateHeader, *UDPHeader, []
 		headerLen = 1 + 8 + 8 + 2 + int(header.PaddingLength) + len(header.Address)
 	}
 	if len(body) < headerLen {
-		return nil, nil, nil, ErrShortPacket
+		return nil, nil, nil, nil, ErrShortPacket
 	}
 	payload := body[headerLen:]
 
-	return separateHeader, header, payload, nil
-}
-
-// packetConn implements SIP022 UDP with session management
-type PacketConn struct {
-	net.PacketConn
-	internal.ShadowCipher
-	sync.RWMutex
-	buf              []byte // write buffer
-	psk              []byte // pre-shared key for AES encryption
-	clientSessionMgr *ClientSessionManager
-	serverSessionMgr *ServerSessionManager
-	session          *ClientSession // Client-side: current session
-	isServer         bool
-}
-
-// NewPacketConn wraps a net.PacketConn with SIP022 UDP session management
-func NewPacketConn(c net.PacketConn, ciph internal.ShadowCipher, psk []byte, role int) *PacketConn {
-	const maxPacketSize = 64 * 1024
-	conn := &PacketConn{
-		PacketConn:   c,
-		ShadowCipher: ciph,
-		buf:          make([]byte, maxPacketSize),
-		isServer:     role == utils.ROLE_SERVER,
-		psk:          psk,
-	}
-
-	return conn
-}
-
-// SetClientSessionManager sets the client-side session manager.
-func (c *PacketConn) SetClientSessionManager(m *ClientSessionManager) {
-	c.clientSessionMgr = m
-}
-
-// SetServerSessionManager sets the server-side session manager.
-func (c *PacketConn) SetServerSessionManager(m *ServerSessionManager) {
-	c.serverSessionMgr = m
-}
-
-// WriteTo encrypts b using SIP022 UDP format and writes to addr
-func (c *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	c.Lock()
-	defer c.Unlock()
-
-	buf, err := c.PackUDP(c.buf, b, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	_, err = c.PacketConn.WriteTo(buf, addr)
-	return len(b), err
-}
-
-// WriteToUDPAddrPort encrypts b using SIP022 UDP format and writes to addr
-// More efficient than WriteTo for UDP connections - avoids interface allocation
-func (c *PacketConn) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error) {
-	udpConn, ok := c.PacketConn.(*net.UDPConn)
-	if !ok {
-		return 0, errors.New("underlying connection is not *net.UDPConn")
-	}
-
-	c.Lock()
-	defer c.Unlock()
-
-	buf, err := c.PackUDP(c.buf, b, nil)
-	if err != nil {
-		return 0, err
-	}
-	_, err = udpConn.WriteToUDPAddrPort(buf, addr)
-	return len(b), err
-}
-
-// ReadFrom reads from the embedded PacketConn and decrypts using SIP022 UDP format
-func (c *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, addr, err := c.PacketConn.ReadFrom(b)
-	if err != nil {
-		return n, addr, err
-	}
-
-	c.Lock()
-	defer c.Unlock()
-
-	_, _, payload, err := c.UnpackUDP(b[0:], b[:n])
-	if err != nil {
-		return n, addr, err
-	}
-
-	copy(b, payload)
-	return len(payload), addr, nil
-}
-
-// ReadFromUDPAddrPort reads from UDP and decrypts using SIP022 UDP format.
-// More efficient than ReadFrom for UDP connections - avoids interface allocation.
-// For server, this is the main entry point for handling UDP packets.
-//
-// Server-side logic:
-// 1. Decrypt packet
-// 2. Validate session (anti-replay + NAT handling)
-// 3. Get or create outbound connection for this session
-// 4. Forward payload to target
-//
-// This is simple and direct - no goroutines, no complex state management.
-func (c *PacketConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
-	udpConn, ok := c.PacketConn.(*net.UDPConn)
-	if !ok {
-		return 0, netip.AddrPort{}, errors.New("underlying connection is not *net.UDPConn")
-	}
-
-	n, clientAddr, err := udpConn.ReadFromUDPAddrPort(b)
-	if err != nil {
-		return n, clientAddr, err
-	}
-
-	c.Lock()
-	defer c.Unlock()
-
-	separateHeader, udpHeader, payload, err := c.UnpackUDP(b[:0], b[:n])
-	if err != nil {
-		return n, clientAddr, err
-	}
-
-	if c.isServer {
-		// Validate session: anti-replay + update client address
-		session, err := c.validateSession(*separateHeader, clientAddr)
-		if err != nil {
-			return 0, netip.AddrPort{}, err
-		}
-
-		// Update target address in session
-		session.SetTarget(udpHeader.Address)
-
-		// Get or create outbound connection atomically (prevents race conditions)
-		conn, isNew, err := session.GetOrCreateConn()
-		if err != nil {
-			return 0, netip.AddrPort{}, err
-		}
-
-		// If this is a new connection, start goroutine to handle return traffic
-		if isNew {
-			go c.handleReturnTraffic(session, conn)
-		}
-
-		// Forward payload to target
-		targetAddr, err := net.ResolveUDPAddr("udp", udpHeader.Address.String())
-		if err != nil {
-			return 0, netip.AddrPort{}, err
-		}
-
-		_, err = conn.WriteTo(payload, targetAddr)
-		if err != nil {
-			return 0, netip.AddrPort{}, err
-		}
-	}
-
-	copy(b, payload)
-	return len(payload), clientAddr, nil
-}
-
-// SetSession sets the current client session (client-side only).
-func (c *PacketConn) SetSession(s *ClientSession) {
-	c.session = s
-}
-
-// validateSession validates and updates the server session.
-// This implements the SIP022 session management logic:
-// 1. Get or create session by client session ID
-// 2. Validate packet ID using sliding window (anti-replay)
-// 3. Update client address (handles NAT rebinding)
-func (c *PacketConn) validateSession(sh SeparateHeader, addr netip.AddrPort) (*ServerSession, error) {
-	if c.serverSessionMgr == nil {
-		return nil, errors.New("server session manager not set")
-	}
-
-	// ValidatePacket does: GetOrCreate + ValidatePacketID + UpdateClientAddr
-	session, err := c.serverSessionMgr.ValidatePacket(sh.SessionID, sh.PacketID, addr)
-	if err != nil {
-		return nil, err
-	}
-
-	return session, nil
-}
-
-// handleReturnTraffic handles return traffic from target server back to client.
-// This goroutine reads from the outbound connection and sends encrypted responses
-// back to the client. This is THE critical function that makes UDP relay work.
-func (c *PacketConn) handleReturnTraffic(session *ServerSession, targetConn net.PacketConn) {
-	buf := make([]byte, 64*1024)
-
-	defer func() {
-		targetConn.Close()
-		if c.serverSessionMgr != nil {
-			c.serverSessionMgr.Delete(session.ClientSessionID())
-		}
-	}()
-
-	for {
-		// Read response from target server
-		targetConn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		n, _, err := targetConn.ReadFrom(buf)
-		if err != nil {
-			return // Timeout or error, close session
-		}
-
-		// Encrypt and send back to client using PackUDP
-		clientAddr := session.GetClientAddr()
-
-		udpConn, ok := c.PacketConn.(*net.UDPConn)
-		if !ok {
-			return
-		}
-
-		// Use PackUDP with serverSession parameter
-		encrypted := make([]byte, 64*1024)
-		packet, err := c.PackUDP(encrypted, buf[:n], session)
-		if err != nil {
-			return
-		}
-
-		_, err = udpConn.WriteToUDPAddrPort(packet, clientAddr)
-		if err != nil {
-			return
-		}
-	}
+	return separateHeader, header, payload, decryptKey, nil
 }

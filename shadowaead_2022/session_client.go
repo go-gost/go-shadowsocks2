@@ -3,12 +3,13 @@ package shadowaead2022
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/shadowsocks/go-shadowsocks2/socks"
+	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
 // ClientSession represents a UDP relay session on the client side.
@@ -19,38 +20,44 @@ import (
 // - Maintains a monotonically increasing packet counter
 // - Remembers the target address for this session
 type ClientSession struct {
-	sessionID uint64         // Randomly generated 8-byte session ID
-	packetID  uint64         // Monotonically increasing packet counter
-	target    socks.Addr     // Target address this session is relaying to
-	conn      net.PacketConn // Outbound connection for this session
-	lastUsed  time.Time      // Last time this session was used (for timeout cleanup)
-	mu        sync.Mutex     // Protects packetID and lastUsed
+	sessionID  uint64        // Randomly generated 8-byte session ID
+	packetID   atomic.Uint64 // Monotonically increasing packet counter
+	target     socks.Addr    // Target address this session is relaying to
+	conn       core.UDPConn  // Outbound connection for this session
+	lastUsed   atomic.Int64  // Last time this session was used (for timeout cleanup)
+	clientAddr netip.AddrPort
+	returning  atomic.Bool
+	mu         sync.RWMutex
 }
 
 // NewClientSession creates a new client session with a random session ID.
-func NewClientSession(target socks.Addr, conn net.PacketConn) *ClientSession {
+func NewClientSession(clientAddr netip.AddrPort, target socks.Addr) *ClientSession {
 	sessionID := make([]byte, 8)
 	rand.Read(sessionID)
 
-	return &ClientSession{
-		sessionID: binary.BigEndian.Uint64(sessionID),
-		packetID:  0,
-		target:    target,
-		conn:      conn,
-		lastUsed:  time.Now(),
+	s := &ClientSession{
+		sessionID:  binary.BigEndian.Uint64(sessionID),
+		target:     target,
+		clientAddr: clientAddr,
 	}
+
+	s.lastUsed.Store(time.Now().Unix())
+	return s
 }
 
 // GetNextPacketID returns the next packet ID and increments the counter.
 // Thread-safe: can be called concurrently.
 func (s *ClientSession) GetNextPacketID() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	pid := s.packetID
-	s.packetID++
-	s.lastUsed = time.Now()
+	pid := s.packetID.Load()
+	s.packetID.Add(1)
 	return pid
+}
+
+func (s *ClientSession) ClientAddr() netip.AddrPort {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.clientAddr
 }
 
 // SessionID returns the session ID.
@@ -64,15 +71,35 @@ func (s *ClientSession) Target() socks.Addr {
 }
 
 // Conn returns the outbound connection for this session.
-func (s *ClientSession) Conn() net.PacketConn {
+func (s *ClientSession) Conn() core.UDPConn {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	return s.conn
+}
+
+func (s *ClientSession) SetConn(conn core.UDPConn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.conn = conn
 }
 
 // LastUsed returns when this session was last used.
 func (s *ClientSession) LastUsed() time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lastUsed
+	return time.Unix(s.lastUsed.Load(), 0)
+}
+
+func (s *ClientSession) Return(b bool) {
+	s.returning.Store(b)
+}
+
+func (s *ClientSession) Returning() bool {
+	return s.returning.Load()
+}
+
+func (s *ClientSession) Touch() {
+	s.lastUsed.Store(time.Now().Unix())
 }
 
 // Close closes the outbound connection.
@@ -80,6 +107,7 @@ func (s *ClientSession) Close() error {
 	if s.conn != nil {
 		return s.conn.Close()
 	}
+
 	return nil
 }
 
@@ -94,6 +122,7 @@ func (s *ClientSession) Close() error {
 type ClientSessionManager struct {
 	sessions map[netip.AddrPort]*ClientSession
 	timeout  time.Duration
+	stop     chan bool
 	mu       sync.RWMutex
 }
 
@@ -106,6 +135,7 @@ func NewClientSessionManager(timeout time.Duration) *ClientSessionManager {
 	mgr := &ClientSessionManager{
 		sessions: make(map[netip.AddrPort]*ClientSession),
 		timeout:  timeout,
+		stop:     make(chan bool),
 	}
 
 	// Start background cleanup
@@ -119,12 +149,13 @@ func NewClientSessionManager(timeout time.Duration) *ClientSessionManager {
 func (m *ClientSessionManager) Get(sourceAddr netip.AddrPort) *ClientSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
 	return m.sessions[sourceAddr]
 }
 
 // GetOrCreate retrieves or creates a session for the source address.
 // If a new session is created, conn will be used as the outbound connection.
-func (m *ClientSessionManager) GetOrCreate(sourceAddr netip.AddrPort, target socks.Addr, conn net.PacketConn) *ClientSession {
+func (m *ClientSessionManager) GetOrCreate(sourceAddr netip.AddrPort, target socks.Addr) *ClientSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -132,7 +163,7 @@ func (m *ClientSessionManager) GetOrCreate(sourceAddr netip.AddrPort, target soc
 		return session
 	}
 
-	session := NewClientSession(target, conn)
+	session := NewClientSession(sourceAddr, target)
 	m.sessions[sourceAddr] = session
 	return session
 }
@@ -156,8 +187,13 @@ func (m *ClientSessionManager) cleanupLoop() {
 	ticker := time.NewTicker(m.timeout / 2)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.cleanup()
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-ticker.C:
+			m.cleanup()
+		}
 	}
 }
 
@@ -181,9 +217,17 @@ func (m *ClientSessionManager) cleanup() {
 	}
 }
 
-// Count returns the number of active sessions (for debugging/monitoring).
-func (m *ClientSessionManager) Count() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.sessions)
+// Close stops the cleanup loop and closes all sessions.
+func (m *ClientSessionManager) Close() error {
+	close(m.stop)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, session := range m.sessions {
+		session.Close()
+	}
+	m.sessions = make(map[netip.AddrPort]*ClientSession)
+
+	return nil
 }

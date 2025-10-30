@@ -4,12 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/shadowsocks/go-shadowsocks2/socks"
+	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
 var (
@@ -29,28 +30,31 @@ var (
 type ServerSession struct {
 	clientSessionID uint64         // Client's session ID (used as key)
 	serverSessionID uint64         // Server's own session ID for responses
-	packetID        uint64         // Server's packet counter for responses
+	packetID        atomic.Uint64  // Server's packet counter for responses
 	clientAddr      netip.AddrPort // Last seen client address (updates on NAT change)
 	replayFilter    *SlidingWindow // Anti-replay protection
 	target          socks.Addr     // Current target address
-	conn            net.PacketConn // Outbound connection to target
-	lastSeen        time.Time      // Last time we received a packet
-	mu              sync.Mutex     // Protects mutable fields
+	conn            core.UDPConn   // Outbound connection to target
+	lastUsed        atomic.Int64   // Last time we received a packet
+	returning       atomic.Bool
+	key             []byte       // key for encryption
+	mu              sync.RWMutex // Protects mutable fields
 }
 
 // NewServerSession creates a new server session for a client session ID.
-func NewServerSession(clientSessionID uint64, clientAddr netip.AddrPort, windowSize uint64) *ServerSession {
+func NewServerSession(clientSessionID uint64, clientAddr netip.AddrPort, windowSize uint64, key []byte) *ServerSession {
 	sessionID := make([]byte, 8)
 	rand.Read(sessionID)
 
-	return &ServerSession{
+	s := &ServerSession{
 		clientSessionID: clientSessionID,
 		serverSessionID: binary.BigEndian.Uint64(sessionID),
-		packetID:        0,
 		clientAddr:      clientAddr,
 		replayFilter:    NewSlidingWindow(windowSize),
-		lastSeen:        time.Now(),
+		key:             key,
 	}
+	s.lastUsed.Store(time.Now().Unix())
+	return s
 }
 
 // ValidatePacket validates a packet ID using the sliding window filter.
@@ -68,7 +72,6 @@ func (s *ServerSession) ValidatePacket(packetID uint64) error {
 		return ErrReplayPacket
 	}
 
-	s.lastSeen = time.Now()
 	return nil
 }
 
@@ -78,13 +81,16 @@ func (s *ServerSession) UpdateClientAddr(addr netip.AddrPort) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.clientAddr = addr
-	s.lastSeen = time.Now()
+}
+
+func (s *ServerSession) Touch() {
+	s.lastUsed.Store(time.Now().Unix())
 }
 
 // GetClientAddr returns the current client address.
-func (s *ServerSession) GetClientAddr() netip.AddrPort {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *ServerSession) ClientAddr() netip.AddrPort {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.clientAddr
 }
 
@@ -93,9 +99,13 @@ func (s *ServerSession) GetNextPacketID() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	pid := s.packetID
-	s.packetID++
+	pid := s.packetID.Load()
+	s.packetID.Add(1)
 	return pid
+}
+
+func (s *ServerSession) Key() []byte {
+	return s.key
 }
 
 // ClientSessionID returns the client's session ID.
@@ -112,56 +122,41 @@ func (s *ServerSession) ServerSessionID() uint64 {
 func (s *ServerSession) SetTarget(target socks.Addr) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.target = target
 }
 
 // GetTarget returns the target address.
-func (s *ServerSession) GetTarget() socks.Addr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *ServerSession) Target() socks.Addr {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.target
 }
 
-// SetConn sets the outbound connection for this session.
-func (s *ServerSession) SetConn(conn net.PacketConn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.conn = conn
+func (s *ServerSession) Return(b bool) {
+	s.returning.Store(b)
+}
+
+func (s *ServerSession) Returning() bool {
+	return s.returning.Load()
 }
 
 // GetConn returns the outbound connection.
-func (s *ServerSession) GetConn() net.PacketConn {
+func (s *ServerSession) Conn() core.UDPConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.conn
 }
 
-// GetOrCreateConn returns the existing connection or creates a new one atomically.
-// This prevents race conditions where multiple goroutines try to create connections.
-// Returns (conn, isNew, error) where isNew indicates if this is a freshly created connection.
-func (s *ServerSession) GetOrCreateConn() (net.PacketConn, bool, error) {
+func (s *ServerSession) SetConn(conn core.UDPConn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.conn != nil {
-		return s.conn, false, nil
-	}
-
-	// Create new connection
-	conn, err := net.ListenPacket("udp", "")
-	if err != nil {
-		return nil, false, err
-	}
-
 	s.conn = conn
-	return conn, true, nil
 }
 
 // LastSeen returns when this session last received a packet.
-func (s *ServerSession) LastSeen() time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lastSeen
+func (s *ServerSession) LastUsed() time.Time {
+	return time.Unix(s.lastUsed.Load(), 0)
 }
 
 // Close closes the outbound connection.
@@ -189,6 +184,7 @@ type ServerSessionManager struct {
 	sessions   map[uint64]*ServerSession
 	timeout    time.Duration
 	windowSize uint64 // Sliding window size for replay protection
+	stop       chan bool
 	mu         sync.RWMutex
 }
 
@@ -205,6 +201,7 @@ func NewServerSessionManager(timeout time.Duration, windowSize uint64) *ServerSe
 		sessions:   make(map[uint64]*ServerSession),
 		timeout:    timeout,
 		windowSize: windowSize,
+		stop:       make(chan bool),
 	}
 
 	// Start background cleanup
@@ -222,7 +219,7 @@ func (m *ServerSessionManager) Get(clientSessionID uint64) *ServerSession {
 }
 
 // GetOrCreate retrieves or creates a session for the client session ID.
-func (m *ServerSessionManager) GetOrCreate(clientSessionID uint64, clientAddr netip.AddrPort) *ServerSession {
+func (m *ServerSessionManager) GetOrCreate(clientSessionID uint64, clientAddr netip.AddrPort, key []byte) *ServerSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -230,7 +227,7 @@ func (m *ServerSessionManager) GetOrCreate(clientSessionID uint64, clientAddr ne
 		return session
 	}
 
-	session := NewServerSession(clientSessionID, clientAddr, m.windowSize)
+	session := NewServerSession(clientSessionID, clientAddr, m.windowSize, key)
 	m.sessions[clientSessionID] = session
 	return session
 }
@@ -238,8 +235,8 @@ func (m *ServerSessionManager) GetOrCreate(clientSessionID uint64, clientAddr ne
 // ValidatePacket is a convenience method that combines session lookup and packet validation.
 // It gets or creates the session, validates the packet ID, and updates the client address.
 // Returns the session and an error if validation fails.
-func (m *ServerSessionManager) ValidatePacket(clientSessionID, packetID uint64, clientAddr netip.AddrPort) (*ServerSession, error) {
-	session := m.GetOrCreate(clientSessionID, clientAddr)
+func (m *ServerSessionManager) ValidatePacket(clientSessionID, packetID uint64, clientAddr netip.AddrPort, key []byte) (*ServerSession, error) {
+	session := m.GetOrCreate(clientSessionID, clientAddr, key)
 
 	// Validate packet ID (anti-replay)
 	if err := session.ValidatePacket(packetID); err != nil {
@@ -271,8 +268,13 @@ func (m *ServerSessionManager) cleanupLoop() {
 	ticker := time.NewTicker(m.timeout / 2)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.cleanup()
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-ticker.C:
+			m.cleanup()
+		}
 	}
 }
 
@@ -284,7 +286,7 @@ func (m *ServerSessionManager) cleanup() {
 	m.mu.Lock()
 	var toClose []*ServerSession
 	for sessionID, session := range m.sessions {
-		if now.Sub(session.LastSeen()) > m.timeout {
+		if now.Sub(session.LastUsed()) > m.timeout {
 			toClose = append(toClose, session)
 			delete(m.sessions, sessionID)
 		}
@@ -297,9 +299,17 @@ func (m *ServerSessionManager) cleanup() {
 	}
 }
 
-// Count returns the number of active sessions (for debugging/monitoring).
-func (m *ServerSessionManager) Count() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.sessions)
+// Close stops the cleanup loop and closes all sessions.
+func (m *ServerSessionManager) Close() error {
+	close(m.stop)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, session := range m.sessions {
+		session.Close()
+	}
+	m.sessions = make(map[uint64]*ServerSession)
+
+	return nil
 }
