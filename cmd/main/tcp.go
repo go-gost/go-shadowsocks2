@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"time"
@@ -14,20 +15,21 @@ import (
 )
 
 // Create a SOCKS server listening on addr and proxy to server.
-func socksLocal(addr string, config core.ClientConfig) {
-	logf("SOCKS proxy %s <-> %s", addr, config.Server)
-	tcpLocal(addr, config, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) })
+func socksLocal(addr, server netip.AddrPort, config core.ClientConfig) {
+	logf("SOCKS proxy %s <-> %s", addr, server)
+	tcpLocal(addr, server, config, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) })
 }
 
 // Listen on addr and proxy to server to reach target from getAddr.
-func tcpLocal(addr string, config core.ClientConfig, getAddr func(net.Conn) (socks.Addr, error)) {
-	l, err := net.Listen("tcp", addr)
+func tcpLocal(addr, server netip.AddrPort, config core.ClientConfig, getAddr func(net.Conn) (socks.Addr, error)) {
+	l, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(addr))
 	logf("listen tcp on: %v", addr)
 	if err != nil {
 		logf("failed to listen on %s: %v", addr, err)
 		return
 	}
 
+	tcpClient := core.NewTCPClient(config)
 	for {
 		c, err := l.Accept()
 		if err != nil {
@@ -35,13 +37,10 @@ func tcpLocal(addr string, config core.ClientConfig, getAddr func(net.Conn) (soc
 			continue
 		}
 
-		tcpClient := core.NewTCPClient(config)
-
 		go func() {
 			defer c.Close()
 			tgt, err := getAddr(c)
 			if err != nil {
-
 				// UDP: keep the connection until disconnect then free the UDP socket
 				if err == socks.InfoUDPAssociate {
 					buf := make([]byte, 1)
@@ -65,13 +64,13 @@ func tcpLocal(addr string, config core.ClientConfig, getAddr func(net.Conn) (soc
 				logf("failed to generate padding: %v", err)
 				return
 			}
-			rc, err := tcpClient.Dial(tgt, padding, nil)
+			rc, err := tcpClient.Dial(tgt, server, padding, nil)
 			if err != nil {
 				logf("failed to dial server: %v", err)
 				return
 			}
 
-			logf("proxy %s <-> %s <-> %s", c.RemoteAddr(), config.Server, tgt)
+			logf("proxy %s <-> %s <-> %s", c.RemoteAddr(), server, tgt)
 			if err = relay(rc, c); err != nil {
 				logf("relay error: %v", err)
 			}
@@ -80,16 +79,49 @@ func tcpLocal(addr string, config core.ClientConfig, getAddr func(net.Conn) (soc
 }
 
 // Listen on addr for incoming connections.
-func tcpRemote(config core.ServerConfig) {
-	server := core.NewTCPServer(config)
-	err := server.Init()
+func tcpRemote(addr netip.AddrPort, config core.ServerConfig) {
+	l, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(addr))
 	if err != nil {
+		logf("failed to listen on %s: %v", addr, err)
+		return
+	}
+
+	logf("listening TCP on %s", addr)
+
+	server := core.NewTCPServer(config)
+	if err := server.Init(); err != nil {
 		logf("failed to init tcp server: %v", err)
 		return
 	}
 
-	if err := server.Start(); err != nil {
-		logf("server err: %v", err)
+	for {
+		c, err := l.AcceptTCP()
+		if err != nil {
+			logf("failed to accept: %v", err)
+			continue
+		}
+
+		go func() {
+			defer c.Close()
+
+			sc, err := server.WrapConn(c)
+			if err != nil {
+				logf("failed to create shadowsocks connection: %v", err)
+				return
+			}
+
+			rc, err := net.Dial("tcp", sc.Target().String())
+			if err != nil {
+				logf("failed to connect to target: %v", err)
+				return
+			}
+			defer rc.Close()
+
+			logf("proxy %s <-> %s", c.RemoteAddr(), sc.Target())
+			if err = relay(sc, rc); err != nil {
+				logf("relay error: %v", err)
+			}
+		}()
 	}
 }
 

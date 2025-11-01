@@ -24,15 +24,15 @@ func (c *UDPClient) Init() error {
 	return nil
 }
 
-func (c *UDPClient) WriteTo(payload []byte, clientAddr netip.AddrPort, target socks.Addr) (UDPSession, error) {
-	session, err := c.sessionManager.ClientHandleReceive(payload, target, clientAddr, c.config.Server)
+func (c *UDPClient) Inbound(payload []byte, clientAddr netip.AddrPort, target socks.Addr) (UDPSession, []byte, error) {
+	session, encryted, err := c.sessionManager.ClientHandleInbound(payload, target, clientAddr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return session, nil
+	return session, encryted, nil
 }
 
-func (c *UDPClient) ReadFrom(session UDPSession) ([]byte, error) {
-	return c.sessionManager.ClientHandleReturn(session)
+func (c *UDPClient) Outbound(encryted []byte, session UDPSession) ([]byte, error) {
+	return c.sessionManager.ClientHandleOutbound(encryted, session)
 }

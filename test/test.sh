@@ -137,7 +137,7 @@ main() {
 	echo -n "Building main executable... "
 	cd "${SCRIPT_PATH}/.."
 	MAIN_BIN="${SCRIPT_PATH}/main"
-	if go build -o "${MAIN_BIN}" ./cmd/main >/dev/null 2>&1; then
+	if go build -race -o "${MAIN_BIN}" ./cmd/main >/dev/null 2>&1; then
 		echo "done"
 	else
 		echo "FAILED"

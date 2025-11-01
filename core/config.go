@@ -1,9 +1,6 @@
 package core
 
 import (
-	"log"
-	"net/netip"
-
 	"github.com/zeebo/blake3"
 )
 
@@ -16,14 +13,11 @@ type UserConfig struct {
 
 type ServerConfig struct {
 	Cipher ShadowCipher
-	Addr   netip.AddrPort
 	Users  []UserConfig
-	Logger *log.Logger
 }
 
 type ClientConfig struct {
 	Cipher ShadowCipher
-	Server netip.AddrPort
 }
 
 func NewUserConfig(name, password string) UserConfig {

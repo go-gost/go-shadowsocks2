@@ -197,8 +197,9 @@ func increment(b []byte) {
 type streamConn struct {
 	*net.TCPConn
 	core.ShadowCipher
-	r *reader
-	w *writer
+	r      *reader
+	w      *writer
+	target socks.Addr
 }
 
 func (c *streamConn) initReader() error {
@@ -287,20 +288,30 @@ func (c *streamConn) InitClient(target socks.Addr, _, _ []byte) error {
 	if err != nil {
 		return err
 	}
+	c.target = target
 
 	return nil
 }
 
-func (c *streamConn) InitServer() (socks.Addr, error) {
+func (c *streamConn) InitServer() error {
 	// Initialize reader (reads salt and checks for replay)
 	if c.r == nil {
 		if err := c.initReader(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	// Read target address from encrypted stream
-	return socks.ReadAddr(c.r)
+	target, err := socks.ReadAddr(c.r)
+	if err != nil {
+		return err
+	}
+	c.target = target
+
+	return nil
+}
+
+func (c *streamConn) Target() socks.Addr {
+	return c.target
 }
 
 // NewConn wraps a stream-oriented net.Conn with cipher.

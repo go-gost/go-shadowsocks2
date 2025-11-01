@@ -645,6 +645,7 @@ type streamConn struct {
 	isServer       bool
 	variableHeader *VariableLengthHeader
 	fixedHeader    *FixedLengthHeader
+	target         socks.Addr
 	clientSalt     []byte                  // Store client salt at connection level
 	userTable      map[core.EIHHash]string // Extensible Identity Headers, for server
 	key            []byte                  // key for encryption and decryption
@@ -748,11 +749,11 @@ func (c *streamConn) validateHeaders() error {
 
 // InitServer will read salt + Extensible Identity Headers + fixed length header + variable length header from first packet of connection
 // Btw, header validating also be applied
-func (c *streamConn) InitServer() (socks.Addr, error) {
+func (c *streamConn) InitServer() error {
 	var err error
 
 	if !c.isServer {
-		return nil, nil
+		return nil
 	}
 
 	defer func() {
@@ -766,7 +767,7 @@ func (c *streamConn) InitServer() (socks.Addr, error) {
 
 	err = c.loadSalt()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// validate Extensible Identity Headers
@@ -774,24 +775,24 @@ func (c *streamConn) InitServer() (socks.Addr, error) {
 		subkey := make([]byte, c.KeySize())
 		userPskHash := make([]byte, 16)
 		if _, err = io.ReadFull(c.TCPConn, userPskHash); err != nil {
-			return nil, err
+			return err
 		}
 
 		blake3.DeriveKey("shadowsocks 2022 identity subkey", append(c.Key(), c.clientSalt...), subkey)
 		var aesCipher cipher.Block
 		aesCipher, err = aes.NewCipher(subkey)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		aesCipher.Decrypt(userPskHash, userPskHash)
 		if password, ok := c.userTable[core.EIHHash(userPskHash)]; !ok {
-			return nil, errors.New("no such user")
+			return errors.New("no such user")
 		} else {
 			var k []byte
 			k, err = core.Base64Decode(password)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			c.key = k
 		}
@@ -799,28 +800,30 @@ func (c *streamConn) InitServer() (socks.Addr, error) {
 
 	if c.r == nil {
 		if err = c.initReader(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if c.variableHeader == nil {
 		if !CheckSalt(c.clientSalt) {
 			err = ErrRepeatedSalt
-			return nil, err
+			return err
 		}
 
 		err = c.r.readHeaders()
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	err = c.validateHeaders()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return c.variableHeader.Addr, nil
+	c.target = c.variableHeader.Addr
+
+	return nil
 }
 
 func (c *streamConn) InitClient(target socks.Addr, padding, initialPayload []byte) error {
@@ -882,6 +885,14 @@ func (c *streamConn) AdditionalHeaders(salt []byte) ([]byte, error) {
 	}
 
 	return r, nil
+}
+
+func (c *streamConn) Target() socks.Addr {
+	return c.target
+}
+
+func (c *streamConn) SetTarget(target socks.Addr) {
+	c.target = target
 }
 
 func (c *streamConn) IsMultiUser() bool {

@@ -79,9 +79,6 @@ func (m *SessionManager) Close() error {
 	m.Lock()
 	defer m.Unlock()
 
-	for _, session := range m.m {
-		session.Close()
-	}
 	m.m = make(map[netip.AddrPort]*aeadSession)
 
 	return nil
@@ -123,7 +120,6 @@ func (m *SessionManager) cleanup() {
 		for _, session := range toDelete {
 			if _, ok := m.m[session.ClientAddr()]; ok {
 				delete(m.m, session.ClientAddr())
-				session.Close()
 			}
 		}
 		m.Unlock()

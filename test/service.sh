@@ -35,7 +35,7 @@ startServices() {
 
 	# Start client
 	CLIENT_LOG="${SCRIPT_PATH}/client_${cipher}.log"
-	${MAIN_BIN} -c "ss://${cipher}:${password}@127.0.0.1:${SERVER_PORT}" --socks ":${SOCKS_PORT}" -verbose -udp >"${CLIENT_LOG}" 2>&1 &
+	${MAIN_BIN} -c "ss://${cipher}:${password}@127.0.0.1:${SERVER_PORT}" --socks "127.0.0.1:${SOCKS_PORT}" -verbose -udp >"${CLIENT_LOG}" 2>&1 &
 	CLIENT_PID=$!
 	echo "SOCKS5 client started (PID: $CLIENT_PID) on port ${SOCKS_PORT}"
 	echo "  Log: ${CLIENT_LOG}"
@@ -62,5 +62,5 @@ stopServices() {
 		kill $CLIENT_PID 2>/dev/null || true
 		CLIENT_PID=""
 	fi
-	sleep 0.2
+	sleep 1
 }
