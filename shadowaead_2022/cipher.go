@@ -58,7 +58,7 @@ func (a *cp) Decrypter(key, salt []byte) (cipher.AEAD, error) {
 	return a.makeAEAD(subkey)
 }
 
-func (a *cp) TCPConn(c *net.TCPConn, config core.TCPConfig, role int) core.TCPConn {
+func (a *cp) TCPConn(c net.Conn, config core.TCPConfig, role int) core.TCPConn {
 	return NewConn(c, a, config, role)
 }
 

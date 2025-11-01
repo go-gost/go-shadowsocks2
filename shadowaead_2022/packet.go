@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/rand"
-	"net"
 	"time"
 
 	"github.com/go-gost/go-shadowsocks2/core"
@@ -397,16 +396,4 @@ func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]string, encryp
 	payload := body[headerLen:]
 
 	return separateHeader, header, payload, decryptKey, nil
-}
-
-type udpConn struct {
-	net.UDPConn
-	session core.UDPSession
-}
-
-func newUDPConn(conn net.UDPConn, session core.UDPSession) core.UDPConn {
-	return &udpConn{
-		UDPConn: conn,
-		session: session,
-	}
 }

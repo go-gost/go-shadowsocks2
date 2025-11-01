@@ -20,5 +20,5 @@ type TCPConn interface {
 }
 
 type TCPConnCipher interface {
-	TCPConn(*net.TCPConn, TCPConfig, int) TCPConn
+	TCPConn(net.Conn, TCPConfig, int) TCPConn
 }

@@ -638,7 +638,7 @@ func (r *reader) WriteTo(w io.Writer) (n int64, err error) {
 }
 
 type streamConn struct {
-	*net.TCPConn
+	net.Conn
 	core.ShadowCipher
 	r              *reader
 	w              *writer
@@ -653,7 +653,7 @@ type streamConn struct {
 
 func (c *streamConn) loadSalt() error {
 	salt := make([]byte, c.SaltSize())
-	if _, err := io.ReadFull(c.TCPConn, salt); err != nil {
+	if _, err := io.ReadFull(c.Conn, salt); err != nil {
 		return err
 	}
 
@@ -677,7 +677,7 @@ func (c *streamConn) initReader() error {
 		return err
 	}
 
-	c.r = newReader(c.TCPConn, aead, c.SaltSize())
+	c.r = newReader(c.Conn, aead, c.SaltSize())
 	c.r.conn = c
 
 	return nil
@@ -711,7 +711,7 @@ func (c *streamConn) initWriter() error {
 		return err
 	}
 
-	c.w = newWriter(c.TCPConn, aead)
+	c.w = newWriter(c.Conn, aead)
 	c.w.salt = salt
 	c.w.conn = c
 
@@ -756,15 +756,6 @@ func (c *streamConn) InitServer() error {
 		return nil
 	}
 
-	defer func() {
-		if err != nil {
-			conn := c.TCPConn
-			// This defends against probes that send one byte at a time to detect
-			// how many bytes the server consumes before closing the connection.
-			conn.CloseWrite()
-		}
-	}()
-
 	err = c.loadSalt()
 	if err != nil {
 		return err
@@ -774,7 +765,7 @@ func (c *streamConn) InitServer() error {
 	if c.IsMultiUser() {
 		subkey := make([]byte, c.KeySize())
 		userPskHash := make([]byte, 16)
-		if _, err = io.ReadFull(c.TCPConn, userPskHash); err != nil {
+		if _, err = io.ReadFull(c.Conn, userPskHash); err != nil {
 			return err
 		}
 
@@ -900,8 +891,8 @@ func (c *streamConn) IsMultiUser() bool {
 }
 
 // NewConn wraps a stream-oriented net.Conn with cipher.
-func NewConn(c *net.TCPConn, ciph core.ShadowCipher, config core.TCPConfig, role int) core.TCPConn {
+func NewConn(c net.Conn, ciph core.ShadowCipher, config core.TCPConfig, role int) core.TCPConn {
 	table := core.UsersToEIHHash(config.Users)
 
-	return &streamConn{TCPConn: c, userTable: table, key: ciph.Key(), ShadowCipher: ciph, isServer: role == core.ROLE_SERVER}
+	return &streamConn{Conn: c, userTable: table, key: ciph.Key(), ShadowCipher: ciph, isServer: role == core.ROLE_SERVER}
 }
