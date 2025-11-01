@@ -18,7 +18,11 @@ func NewTCPServer(config ServerConfig) TCPServer {
 }
 
 // This is a block function
-func (s *TCPServer) WrapConn(conn *net.TCPConn) (TCPConn, error) {
+// When some errors lead to unexpected closing of conn, the caller MUST act
+// in a way that does not exhibit the amount of bytes consumed by the server.
+// This defends against probes that send one byte at a time to detect how many
+// bytes the server consumes before closing the connection.
+func (s *TCPServer) WrapConn(conn net.Conn) (TCPConn, error) {
 	tcpConfig := TCPConfig{Users: s.config.Users}
 	sc := s.config.Cipher.TCPConn(conn, tcpConfig, ROLE_SERVER)
 

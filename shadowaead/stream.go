@@ -195,7 +195,7 @@ func increment(b []byte) {
 }
 
 type streamConn struct {
-	*net.TCPConn
+	net.Conn
 	core.ShadowCipher
 	r      *reader
 	w      *writer
@@ -204,7 +204,7 @@ type streamConn struct {
 
 func (c *streamConn) initReader() error {
 	salt := make([]byte, c.SaltSize())
-	if _, err := io.ReadFull(c.TCPConn, salt); err != nil {
+	if _, err := io.ReadFull(c.Conn, salt); err != nil {
 		return err
 	}
 
@@ -217,7 +217,7 @@ func (c *streamConn) initReader() error {
 		return ErrRepeatedSalt
 	}
 
-	c.r = newReader(c.TCPConn, aead)
+	c.r = newReader(c.Conn, aead)
 	return nil
 }
 
@@ -248,12 +248,12 @@ func (c *streamConn) initWriter() error {
 	if err != nil {
 		return err
 	}
-	_, err = c.TCPConn.Write(salt)
+	_, err = c.Conn.Write(salt)
 	if err != nil {
 		return err
 	}
 	AddSalt(salt)
-	c.w = newWriter(c.TCPConn, aead)
+	c.w = newWriter(c.Conn, aead)
 	return nil
 }
 
@@ -315,6 +315,6 @@ func (c *streamConn) Target() socks.Addr {
 }
 
 // NewConn wraps a stream-oriented net.Conn with cipher.
-func NewConn(c *net.TCPConn, ciph core.ShadowCipher) core.TCPConn {
-	return &streamConn{TCPConn: c, ShadowCipher: ciph}
+func NewConn(c net.Conn, ciph core.ShadowCipher) core.TCPConn {
+	return &streamConn{Conn: c, ShadowCipher: ciph}
 }

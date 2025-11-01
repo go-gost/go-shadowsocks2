@@ -28,10 +28,9 @@ type UDPSessionManager struct {
 	// Client-side state
 	clientSessionMgr *ClientSessionManager
 
-	timeout     time.Duration
-	windowSize  uint64
-	isServer    bool
-	connBuilder func() core.UDPConn
+	timeout    time.Duration
+	windowSize uint64
+	isServer   bool
 
 	userTable map[core.EIHHash]string // Extensible Identity Headers, for server
 }

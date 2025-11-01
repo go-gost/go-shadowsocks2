@@ -102,6 +102,13 @@ func tcpRemote(addr netip.AddrPort, config core.ServerConfig) {
 		}
 
 		go func() {
+			defer func() {
+				// to against probes that send one byte at a time to detect
+				// how many bytes the server consumes before closing the connection.
+				c.CloseWrite()
+				io.ReadAll(c)
+			}()
+
 			defer c.Close()
 
 			sc, err := server.WrapConn(c)
