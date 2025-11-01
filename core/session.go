@@ -2,6 +2,7 @@ package core
 
 import (
 	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/go-gost/go-shadowsocks2/socks"
@@ -54,4 +55,8 @@ type UDPSession interface {
 
 func SessionHashFromAddrPort(addr netip.AddrPort) SessionHash {
 	return SessionHash(addr.String())
+}
+
+func SessionHashFromSessionID(id uint64) SessionHash {
+	return SessionHash(strconv.FormatUint(id, 10))
 }

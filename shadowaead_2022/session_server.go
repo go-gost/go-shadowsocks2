@@ -93,7 +93,7 @@ func (s *ServerSession) ClientAddr() netip.AddrPort {
 }
 
 func (s *ServerSession) Hash() core.SessionHash {
-	return core.SessionHash(s.SessionID())
+	return core.SessionHashFromSessionID(s.serverSessionID)
 }
 
 // GetNextPacketID returns the next packet ID for server responses.
