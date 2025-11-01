@@ -5,16 +5,16 @@ import (
 	"os"
 	"testing"
 
-	"github.com/go-gost/go-shadowsocks2/internal"
+	"github.com/go-gost/go-shadowsocks2/shadowaead"
 )
 
 var (
-	bloomRingInstance *internal.BloomRing
+	bloomRingInstance *shadowaead.BloomRing
 )
 
 func TestMain(m *testing.M) {
-	bloomRingInstance = internal.NewBloomRing(internal.DefaultSFSlot, int(internal.DefaultSFCapacity),
-		internal.DefaultSFFPR)
+	bloomRingInstance = shadowaead.NewBloomRing(shadowaead.DefaultSFSlot, int(shadowaead.DefaultSFCapacity),
+		shadowaead.DefaultSFFPR)
 	os.Exit(m.Run())
 }
 
@@ -33,7 +33,7 @@ func TestBloomRing_NilAdd(t *testing.T) {
 			t.Fatalf("Should not got panic while adding item: %v", any)
 		}
 	}()
-	var nilRing *internal.BloomRing
+	var nilRing *shadowaead.BloomRing
 	nilRing.Add(make([]byte, 16))
 }
 
@@ -46,7 +46,7 @@ func TestBloomRing_Test(t *testing.T) {
 }
 
 func TestBloomRing_NilTestIsFalse(t *testing.T) {
-	var nilRing *internal.BloomRing
+	var nilRing *shadowaead.BloomRing
 	if nilRing.Test([]byte("shadowsocks")) {
 		t.Fatal("Test should return false for nil BloomRing")
 	}
@@ -54,7 +54,7 @@ func TestBloomRing_NilTestIsFalse(t *testing.T) {
 
 func BenchmarkBloomRing(b *testing.B) {
 	// Generate test samples with different length
-	samples := make([][]byte, internal.DefaultSFCapacity-internal.DefaultSFSlot)
+	samples := make([][]byte, shadowaead.DefaultSFCapacity-shadowaead.DefaultSFSlot)
 	var checkPoints [][]byte
 	for i := 0; i < len(samples); i++ {
 		samples[i] = []byte(fmt.Sprint(i))
@@ -69,7 +69,7 @@ func BenchmarkBloomRing(b *testing.B) {
 }
 
 func benchmarkBloomRing(samples, checkPoints [][]byte, slot int) func(*testing.B) {
-	filter := internal.NewBloomRing(slot, int(internal.DefaultSFCapacity), internal.DefaultSFFPR)
+	filter := shadowaead.NewBloomRing(slot, int(shadowaead.DefaultSFCapacity), shadowaead.DefaultSFFPR)
 	for _, sample := range samples {
 		filter.Add(sample)
 	}
