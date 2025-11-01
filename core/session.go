@@ -51,3 +51,7 @@ type UDPSession interface {
 	// unique id for identifying session
 	Hash() SessionHash
 }
+
+func SessionHashFromAddrPort(addr netip.AddrPort) SessionHash {
+	return SessionHash(addr.String())
+}

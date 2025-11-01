@@ -3,7 +3,6 @@ package shadowaead2022
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -70,7 +69,7 @@ func (s *ClientSession) Target() socks.Addr {
 }
 
 func (s *ClientSession) Hash() core.SessionHash {
-	return core.SessionHash(fmt.Sprintf("%v-%v", 2022, s.ClientAddr()))
+	return core.SessionHash(s.clientAddr.String())
 }
 
 // LastUsed returns when this session was last used.

@@ -197,9 +197,10 @@ func increment(b []byte) {
 type streamConn struct {
 	net.Conn
 	core.ShadowCipher
-	r      *reader
-	w      *writer
-	target socks.Addr
+	r                 *reader
+	w                 *writer
+	target            socks.Addr
+	shouldWriteTarget bool // for client
 }
 
 func (c *streamConn) initReader() error {
@@ -254,6 +255,14 @@ func (c *streamConn) initWriter() error {
 	}
 	AddSalt(salt)
 	c.w = newWriter(c.Conn, aead)
+
+	if c.shouldWriteTarget {
+		if _, err := c.w.Write(c.target); err != nil {
+			return nil
+		}
+		c.shouldWriteTarget = false
+	}
+
 	return nil
 }
 
@@ -276,19 +285,8 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (c *streamConn) InitClient(target socks.Addr, _, _ []byte) error {
-	// Initialize writer (sends salt)
-	if c.w == nil {
-		if err := c.initWriter(); err != nil {
-			return err
-		}
-	}
-
-	// Write target address to encrypted stream
-	_, err := c.w.Write(target)
-	if err != nil {
-		return err
-	}
 	c.target = target
+	c.shouldWriteTarget = true
 
 	return nil
 }
@@ -314,7 +312,19 @@ func (c *streamConn) Target() socks.Addr {
 	return c.target
 }
 
+func (c *streamConn) ClientFirstWrite() error {
+	// Initialize writer (sends salt and target)
+	if c.w == nil {
+		if err := c.initWriter(); err != nil {
+			return err
+		}
+	}
+	c.shouldWriteTarget = false
+
+	return nil
+}
+
 // NewConn wraps a stream-oriented net.Conn with cipher.
 func NewConn(c net.Conn, ciph core.ShadowCipher) core.TCPConn {
-	return &streamConn{Conn: c, ShadowCipher: ciph}
+	return &streamConn{Conn: c, ShadowCipher: ciph, shouldWriteTarget: false}
 }

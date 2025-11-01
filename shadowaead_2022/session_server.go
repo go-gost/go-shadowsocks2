@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -94,7 +93,7 @@ func (s *ServerSession) ClientAddr() netip.AddrPort {
 }
 
 func (s *ServerSession) Hash() core.SessionHash {
-	return core.SessionHash(fmt.Sprintf("%v-%v", 2022, s.SessionID()))
+	return core.SessionHash(s.SessionID())
 }
 
 // GetNextPacketID returns the next packet ID for server responses.
