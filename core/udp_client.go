@@ -7,6 +7,9 @@ import (
 	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
+// Clients create UDP relay sessions based on source address and port.
+// When a client receives a packet from a new source address and port,
+// it opens a new relay session, and subsequent packets from that source are sent over the same session.
 type UDPClient struct {
 	config         ClientConfig
 	sessionManager UDPSessionManager

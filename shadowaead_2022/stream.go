@@ -890,6 +890,24 @@ func (c *streamConn) IsMultiUser() bool {
 	return c.userTable != nil
 }
 
+func (c *streamConn) ClientFirstWrite() error {
+	if c.w == nil {
+		if err := c.initWriter(); err != nil {
+			return err
+		}
+	}
+
+	if !c.w.headerSent {
+		err := c.w.sendClientHeaders()
+		if err != nil {
+			return err
+		}
+		c.w.headerSent = true
+	}
+
+	return nil
+}
+
 // NewConn wraps a stream-oriented net.Conn with cipher.
 func NewConn(c net.Conn, ciph core.ShadowCipher, config core.TCPConfig, role int) core.TCPConn {
 	table := core.UsersToEIHHash(config.Users)

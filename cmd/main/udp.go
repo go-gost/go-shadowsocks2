@@ -124,6 +124,7 @@ func udpRemote(addr netip.AddrPort, config core.ServerConfig) {
 					if err != nil {
 						logf("faled to read data from target: %v", err)
 						return
+
 					}
 
 					encrypted, err := server.Outbound(buf[:n], session)

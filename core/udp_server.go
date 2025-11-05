@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+// Servers manage UDP relay sessions by session ID.
+// Each client session corresponds to one outgoing UDP socket on the server.
 type UDPServer struct {
 	config         ServerConfig
 	sessionManager UDPSessionManager
