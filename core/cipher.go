@@ -18,6 +18,7 @@ func (e KeySizeError) Error() string {
 }
 
 type MetaCipher struct {
+	Name      string
 	KeySize   int
 	SaltSize  int
 	NonceSize int

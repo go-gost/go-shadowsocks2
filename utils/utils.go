@@ -19,6 +19,7 @@ var SupportedMethods = map[string]struct {
 }{
 	"chacha20-ietf-poly1305": {
 		meta: core.MetaCipher{
+			Name:      "chacha20-ietf-poly1305",
 			KeySize:   32,
 			SaltSize:  32,
 			NonceSize: 12,
@@ -28,6 +29,7 @@ var SupportedMethods = map[string]struct {
 	},
 	"aes-256-gcm": {
 		meta: core.MetaCipher{
+			Name:      "aes-256-gcm",
 			KeySize:   32,
 			SaltSize:  32,
 			NonceSize: 12,
@@ -37,6 +39,7 @@ var SupportedMethods = map[string]struct {
 	},
 	"aes-128-gcm": {
 		meta: core.MetaCipher{
+			Name:      "aes-128-gcm",
 			KeySize:   16,
 			SaltSize:  16,
 			NonceSize: 12,
@@ -46,6 +49,7 @@ var SupportedMethods = map[string]struct {
 	},
 	"2022-blake3-aes-128-gcm": {
 		meta: core.MetaCipher{
+			Name:      "2022-blake3-aes-128-gcm",
 			KeySize:   16,
 			SaltSize:  16,
 			NonceSize: 12,
@@ -55,6 +59,7 @@ var SupportedMethods = map[string]struct {
 	},
 	"2022-blake3-aes-256-gcm": {
 		meta: core.MetaCipher{
+			Name:      "2022-blake3-aes-256-gcm",
 			KeySize:   32,
 			SaltSize:  32,
 			NonceSize: 12,
@@ -62,6 +67,16 @@ var SupportedMethods = map[string]struct {
 		},
 		New: shadowaead2022.AESGCM,
 	},
+	// "2022-blake3-chacha20-poly1305": {
+	// 	meta: core.MetaCipher{
+	// 		Name:      "2022-blake3-chacha20-poly1305",
+	// 		KeySize:   32,
+	// 		SaltSize:  32,
+	// 		NonceSize: 12,
+	// 		TagSize:   16,
+	// 	},
+	// 	New: shadowaead2022.Chacha20Poly1305,
+	// },
 }
 
 func ListCipher() []string {
@@ -111,6 +126,7 @@ func NewClientConfig(method, password string) (core.ClientConfig, error) {
 
 	return config, nil
 }
+
 func GeneratePadding() (int, []byte, error) {
 	length := rand.Intn(shadowaead2022.MaxPaddingLength)
 	padding := make([]byte, length)

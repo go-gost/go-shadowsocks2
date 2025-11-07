@@ -99,6 +99,7 @@ func Chacha20Poly1305(meta core.MetaCipher, password string) (core.ShadowCipher,
 	if len(psk) != meta.KeySize {
 		return nil, core.KeySizeError(chacha20poly1305.KeySize)
 	}
+
 	return &cp{psk: psk, meta: meta, makeAEAD: chacha20poly1305.New}, nil
 }
 
