@@ -17,7 +17,7 @@ func NewTCPClient(config ClientConfig) TCPClient {
 	}
 }
 
-func (c *TCPClient) Dial(target socks.Addr, server netip.AddrPort, padding, initialPayload []byte) (TCPConn, error) {
+func (c *TCPClient) Dial(target socks.Addr, server netip.AddrPort) (TCPConn, error) {
 	tcpConn, err := net.DialTCP("tcp", nil, net.TCPAddrFromAddrPort(server))
 	if err != nil {
 		return nil, err
@@ -25,15 +25,15 @@ func (c *TCPClient) Dial(target socks.Addr, server netip.AddrPort, padding, init
 
 	tcpConfig := TCPConfig{}
 	conn := c.config.Cipher.TCPConn(tcpConn, tcpConfig, ROLE_CLIENT)
-	err = conn.InitClient(target, padding, initialPayload)
+	err = conn.InitClient(target)
 
 	return conn, err
 }
 
-func (c *TCPClient) WrapConn(conn net.Conn, target socks.Addr, padding, initialPayload []byte) (TCPConn, error) {
+func (c *TCPClient) WrapConn(conn net.Conn, target socks.Addr) (TCPConn, error) {
 	tcpConfig := TCPConfig{}
 	tcpConn := c.config.Cipher.TCPConn(conn, tcpConfig, ROLE_CLIENT)
-	err := tcpConn.InitClient(target, padding, initialPayload)
+	err := tcpConn.InitClient(target)
 
 	return tcpConn, err
 }

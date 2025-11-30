@@ -127,6 +127,7 @@ func NewClientConfig(method, password string) (core.ClientConfig, error) {
 	return config, nil
 }
 
+// Deprecated: when caller send first packet, the padding and initialPayload will be filled
 func GeneratePadding() (int, []byte, error) {
 	length := rand.Intn(shadowaead2022.MaxPaddingLength)
 	padding := make([]byte, length)

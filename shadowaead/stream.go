@@ -284,7 +284,7 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 	return c.w.ReadFrom(r)
 }
 
-func (c *streamConn) InitClient(target socks.Addr, _, _ []byte) error {
+func (c *streamConn) InitClient(target socks.Addr) error {
 	c.target = target
 	c.shouldWriteTarget = true
 
