@@ -14,8 +14,8 @@ type TCPConfig struct {
 type TCPConn interface {
 	net.Conn
 
-	InitServer() error                                                  // for server side
-	InitClient(target socks.Addr, padding, initialPayload []byte) error // for client side
+	InitServer() error                  // for server side
+	InitClient(target socks.Addr) error // for client side
 	Target() socks.Addr
 
 	ClientFirstWrite() error // send headers, for fast opening

@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-gost/go-shadowsocks2/core"
 	"github.com/go-gost/go-shadowsocks2/socks"
-	"github.com/go-gost/go-shadowsocks2/utils"
 )
 
 // Create a SOCKS server listening on addr and proxy to server.
@@ -59,12 +58,7 @@ func tcpLocal(addr, server netip.AddrPort, config core.ClientConfig, getAddr fun
 				return
 			}
 
-			_, padding, err := utils.GeneratePadding()
-			if err != nil {
-				logf("failed to generate padding: %v", err)
-				return
-			}
-			rc, err := tcpClient.Dial(tgt, server, padding, nil)
+			rc, err := tcpClient.Dial(tgt, server)
 			if err != nil {
 				logf("failed to dial server: %v", err)
 				return
