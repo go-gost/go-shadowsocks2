@@ -80,9 +80,10 @@ type streamConn struct {
 	variableHeader      *RequestVariableLengthHeader
 	fixedHeader         *RequestFixedLengthHeader
 	responseFixedHeader *ResponseFixedLengthHeader
-	clientSalt          []byte                  // Store client salt at connection level
-	userTable           map[core.EIHHash]string // Extensible Identity Headers, for server
-	key                 []byte                  // key for encryption and decryption
+	clientSalt          []byte                    // Store client salt at connection level
+	userTable           map[core.EIHHash]core.UserConfig // Extensible Identity Headers, for server
+	clientID            string
+	key                 []byte // key for encryption and decryption
 }
 
 type writer struct {
@@ -853,15 +854,16 @@ func (c *streamConn) InitServer() error {
 		}
 
 		aesCipher.Decrypt(userPskHash, userPskHash)
-		if password, ok := c.userTable[core.EIHHash(userPskHash)]; !ok {
+		if u, ok := c.userTable[core.EIHHash(userPskHash)]; !ok {
 			return errors.New("no such user")
 		} else {
 			var k []byte
-			k, err = core.Base64Decode(password)
+			k, err = core.Base64Decode(u.Password)
 			if err != nil {
 				return err
 			}
 			c.key = k
+			c.clientID = u.Name
 		}
 	}
 
@@ -985,6 +987,10 @@ func (c *streamConn) Target() socks.Addr {
 
 func (c *streamConn) IsMultiUser() bool {
 	return c.userTable != nil
+}
+
+func (c *streamConn) ClientID() string {
+	return c.clientID
 }
 
 // for fast open, send headers

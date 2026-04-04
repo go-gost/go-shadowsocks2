@@ -314,7 +314,7 @@ func PackUDP(c core.ShadowCipher, eih bool, separateHeaderKey, bodyKey []byte, p
 // 2. decrypt Extensible Identity Headers if userTable is not nil
 // 3. decrypt body. For server, use the key from EIH. For client, use the last key of ciph
 // NOTE: For server, there is only one key in the ciph
-func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]string, encrypted []byte) (*SeparateHeader, *UDPHeader, []byte, []byte, error) {
+func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]core.UserConfig, encrypted []byte) (*SeparateHeader, *UDPHeader, []byte, []byte, error) {
 	// Decrypt separate header with AES using PSK
 	pos := 0
 	decryptKey := ciph.Key()
@@ -344,10 +344,10 @@ func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]string, encryp
 			return nil, nil, nil, nil, err
 		}
 
-		if password, ok := userTable[core.EIHHash(nextKeyHash)]; !ok {
+		if u, ok := userTable[core.EIHHash(nextKeyHash)]; !ok {
 			return nil, nil, nil, nil, errors.New("no such user")
 		} else {
-			k, err := core.Base64Decode(password)
+			k, err := core.Base64Decode(u.Password)
 			if err != nil {
 				return nil, nil, nil, nil, err
 			}

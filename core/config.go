@@ -24,17 +24,17 @@ func NewUserConfig(name, password string) UserConfig {
 	return UserConfig{Name: name, Password: password}
 }
 
-func UsersToEIHHash(users []UserConfig) map[EIHHash]string {
+func UsersToEIHHash(users []UserConfig) map[EIHHash]UserConfig {
 	if len(users) == 0 {
 		return nil
 	}
 
-	t := make(map[EIHHash]string)
+	t := make(map[EIHHash]UserConfig)
 	for _, u := range users {
 		h, err := Base64Decode(u.Password)
 		sum := blake3.Sum256(h)
 		if err == nil {
-			t[EIHHash(sum[:16])] = u.Password
+			t[EIHHash(sum[:16])] = u
 		}
 	}
 

@@ -19,6 +19,7 @@ type TCPConn interface {
 	Target() socks.Addr
 
 	ClientFirstWrite() error // send headers, for fast opening
+	ClientID() string
 }
 
 type TCPConnCipher interface {
