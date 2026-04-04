@@ -32,12 +32,12 @@ type UDPSessionManager struct {
 	windowSize uint64
 	isServer   bool
 
-	userTable map[core.EIHHash]string // Extensible Identity Headers, for server
+	userTable map[core.EIHHash]core.UserConfig // Extensible Identity Headers, for server
 }
 
 // newUDPSessionManager creates a session manager for UDP protocol.
 // role: core.ROLE_SERVER or core.ROLE_CLIENT
-func newUDPSessionManager(cipher core.ShadowCipher, userTable map[core.EIHHash]string, timeout time.Duration, windowSize int, role int) *UDPSessionManager {
+func newUDPSessionManager(cipher core.ShadowCipher, userTable map[core.EIHHash]core.UserConfig, timeout time.Duration, windowSize int, role int) *UDPSessionManager {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}

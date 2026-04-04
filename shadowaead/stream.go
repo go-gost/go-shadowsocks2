@@ -312,6 +312,8 @@ func (c *streamConn) Target() socks.Addr {
 	return c.target
 }
 
+func (c *streamConn) ClientID() string { return "" }
+
 func (c *streamConn) ClientFirstWrite() error {
 	// Initialize writer (sends salt and target)
 	if c.w == nil {
