@@ -40,17 +40,21 @@ func NewAEADSessionManager(cipher core.ShadowCipher, timeout time.Duration, role
 // AEAD protocol flow:
 // 1. Decrypt packet: extract salt, decrypt with AEAD
 // 2. Parse target address from decrypted payload
-func (m *AEADSessionManager) ServerHandleInbound(encrypted []byte, clientAddr netip.AddrPort) (core.UDPSession, []byte, error) {
+func (m *AEADSessionManager) ServerHandleInbound(encrypted []byte, clientAddr netip.AddrPort) (core.UDPSession, socks.Addr, []byte, error) {
+	if len(encrypted) < m.cipher.SaltSize() {
+		return nil, nil, nil, ErrShortPacket
+	}
+
 	// Decrypt packet
 	payload, err := Unpack(encrypted[m.cipher.SaltSize():], encrypted, m.cipher)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Extract target address (AEAD: target is embedded in each packet)
 	target := socks.SplitAddr(payload)
 	if target == nil {
-		return nil, nil, ErrShortPacket
+		return nil, nil, nil, ErrShortPacket
 	}
 
 	// Get actual payload (after target address)
@@ -61,10 +65,10 @@ func (m *AEADSessionManager) ServerHandleInbound(encrypted []byte, clientAddr ne
 	// Update last used time
 	session.Touch()
 
-	return session, actualPayload, err
+	return session, target, actualPayload, err
 }
 
-func (m *AEADSessionManager) ServerHandleOutbound(plaintext []byte, session core.UDPSession) ([]byte, error) {
+func (m *AEADSessionManager) ServerHandleOutbound(plaintext []byte, target socks.Addr, session core.UDPSession) ([]byte, error) {
 	s := session.(*aeadSession)
 
 	buf := make([]byte, len(plaintext)+m.cipher.SaltSize()+m.cipher.TagSize())
@@ -102,6 +106,10 @@ func (m *AEADSessionManager) ClientHandleInbound(payload []byte, target socks.Ad
 
 func (m *AEADSessionManager) ClientHandleOutbound(encrypted []byte, udpSession core.UDPSession) ([]byte, error) {
 	session := udpSession.(*aeadSession)
+
+	if len(encrypted) < m.cipher.SaltSize() {
+		return nil, ErrShortPacket
+	}
 
 	payload, err := Unpack(encrypted[m.cipher.SaltSize():], encrypted, m.cipher)
 	if err != nil {

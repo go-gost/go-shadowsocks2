@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -36,7 +37,8 @@ type ServerSession struct {
 	target          socks.Addr     // Current target address
 	lastUsed        atomic.Int64   // Last time we received a packet
 	key             []byte         // key for encryption
-	mu              sync.RWMutex   // Protects mutable fields
+	conn            net.PacketConn
+	mu              sync.RWMutex // Protects mutable fields
 }
 
 // NewServerSession creates a new server session for a client session ID.
@@ -140,6 +142,14 @@ func (s *ServerSession) LastUsed() time.Time {
 	return time.Unix(s.lastUsed.Load(), 0)
 }
 
+func (s *ServerSession) Conn() net.PacketConn {
+	return s.conn
+}
+
+func (s *ServerSession) SetConn(c net.PacketConn) {
+	s.conn = c
+}
+
 // ServerSessionManager manages UDP relay sessions on the server side.
 // It maps client session IDs to server sessions.
 //
@@ -150,54 +160,41 @@ func (s *ServerSession) LastUsed() time.Time {
 // 4. Sessions timeout after inactivity
 // 5. No special cases: just a map lookup
 type ServerSessionManager struct {
-	sessions   map[uint64]*ServerSession
-	timeout    time.Duration
+	cache      *core.SessionCache[uint64, *ServerSession]
 	windowSize uint64 // Sliding window size for replay protection
-	stop       chan bool
-	mu         sync.RWMutex
 }
 
 // NewServerSessionManager creates a new server-side session manager.
 func NewServerSessionManager(timeout time.Duration, windowSize uint64) *ServerSessionManager {
-	if timeout == 0 {
-		timeout = 60 * time.Second // Default timeout
-	}
 	if windowSize == 0 {
 		windowSize = 2000 // SIP022 default
 	}
 
-	mgr := &ServerSessionManager{
-		sessions:   make(map[uint64]*ServerSession),
-		timeout:    timeout,
+	return &ServerSessionManager{
+		cache: core.NewSessionCache[uint64, *ServerSession](timeout, func(k uint64, v *ServerSession) {
+			if v.Conn() != nil {
+				v.Conn().Close()
+			}
+		}),
 		windowSize: windowSize,
-		stop:       make(chan bool),
 	}
-
-	// Start background cleanup
-	go mgr.cleanupLoop()
-
-	return mgr
 }
 
 // Get retrieves an existing session by client session ID.
 // Returns nil if no session exists.
 func (m *ServerSessionManager) Get(clientSessionID uint64) *ServerSession {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.sessions[clientSessionID]
+	session, _ := m.cache.Get(clientSessionID)
+	return session
 }
 
 // GetOrCreate retrieves or creates a session for the client session ID.
 func (m *ServerSessionManager) GetOrCreate(clientSessionID uint64, clientAddr netip.AddrPort, key []byte) *ServerSession {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if session, exists := m.sessions[clientSessionID]; exists {
+	if session, exists := m.cache.Get(clientSessionID); exists {
 		return session
 	}
 
 	session := NewServerSession(clientSessionID, clientAddr, m.windowSize, key)
-	m.sessions[clientSessionID] = session
+	m.cache.Put(clientSessionID, session)
 	return session
 }
 
@@ -220,53 +217,10 @@ func (m *ServerSessionManager) ValidatePacket(clientSessionID, packetID uint64, 
 
 // Delete removes a session and closes its connection.
 func (m *ServerSessionManager) Delete(clientSessionID uint64) {
-	m.mu.Lock()
-	_, exists := m.sessions[clientSessionID]
-	if exists {
-		delete(m.sessions, clientSessionID)
-	}
-	m.mu.Unlock()
-}
-
-// cleanupLoop runs in the background to remove expired sessions.
-func (m *ServerSessionManager) cleanupLoop() {
-	ticker := time.NewTicker(m.timeout / 2)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.stop:
-			return
-		case <-ticker.C:
-			m.cleanup()
-		}
-	}
-}
-
-// cleanup removes sessions that haven't been seen recently.
-// SIP022 spec: "Each relay session MUST be remembered for at least 60 seconds"
-func (m *ServerSessionManager) cleanup() {
-	now := time.Now()
-
-	m.mu.Lock()
-	var toClose []*ServerSession
-	for sessionID, session := range m.sessions {
-		if now.Sub(session.LastUsed()) > m.timeout {
-			toClose = append(toClose, session)
-			delete(m.sessions, sessionID)
-		}
-	}
-	m.mu.Unlock()
+	m.cache.Delete(clientSessionID)
 }
 
 // Close stops the cleanup loop and closes all sessions.
 func (m *ServerSessionManager) Close() error {
-	close(m.stop)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.sessions = make(map[uint64]*ServerSession)
-
-	return nil
+	return m.cache.Close()
 }

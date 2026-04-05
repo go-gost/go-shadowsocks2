@@ -10,6 +10,7 @@ source "$(dirname "$0")/service.sh"
 # Test servers configuration
 HTTP_SERVER_PORT=8888
 UDP_SERVER_PORT=9999
+UDP_SERVER_PORT_ALT=10000
 TEST_SERVERS_PID=""
 
 echo "========================================="
@@ -73,10 +74,10 @@ waitForPort() {
 }
 
 # Test TCP connection via SOCKS5
-testTCP() {
+testTCPHealth() {
 	echo ""
 	echo "----------------------------------------"
-	echo "Test 1: TCP Connection via SOCKS5"
+	echo "Test 1: TCP Health Check via SOCKS5"
 	echo "----------------------------------------"
 
 	echo -n "  Testing HTTP GET to local server via SOCKS5 proxy... "
@@ -97,11 +98,34 @@ testTCP() {
 	fi
 }
 
-# Test UDP connection via SOCKS5
-testUDP() {
+testTCPRootPage() {
 	echo ""
 	echo "----------------------------------------"
-	echo "Test 2: UDP Connection via SOCKS5"
+	echo "Test 2: TCP Root Page via SOCKS5"
+	echo "----------------------------------------"
+
+	echo -n "  Testing HTTP GET / via SOCKS5 proxy... "
+
+	response=$(curl --socks5 127.0.0.1:${SOCKS_PORT} \
+		--connect-timeout 10 \
+		--max-time 15 \
+		http://127.0.0.1:${HTTP_SERVER_PORT}/ 2>&1 || echo "FAILED")
+
+	if printf '%s' "$response" | grep -q "Shadowsocks Test Server"; then
+		echo "PASSED"
+		return 0
+	else
+		echo "FAILED"
+		echo "  Response: $response"
+		return 1
+	fi
+}
+
+# Test UDP connection via SOCKS5
+testUDPShortPayload() {
+	echo ""
+	echo "----------------------------------------"
+	echo "Test 3: UDP Short Payload via SOCKS5"
 	echo "----------------------------------------"
 
 	echo -n "  Testing UDP echo via SOCKS5 proxy... "
@@ -109,20 +133,125 @@ testUDP() {
 	# Use socks5_udp_echo to send UDP packet through SOCKS5 proxy
 	result=$("${SOCKS5_UDP_ECHO_BIN}" 127.0.0.1:${SOCKS_PORT} 127.0.0.1:${UDP_SERVER_PORT} "test" 2>&1)
 
-	if echo "$result" | grep -q "UDP echo successful"; then
+	if printf '%s' "$result" | grep -q "UDP echo successful"; then
 		echo "PASSED"
-		echo "$result" | grep -E "Sent:|Received:" | sed 's/^/    /'
+		printf '%s\n' "$result" | grep -E "Sent:|Received:" | sed 's/^/    /'
 	else
 		echo "FAILED"
 		echo "  Output:"
-		echo "$result" | head -10 | sed 's/^/    /'
+		printf '%s\n' "$result" | sed -n '1,10p' | sed 's/^/    /'
 		return 1
 	fi
 
 	echo ""
-	echo "  ✓ UDP SOCKS5 relay fully functional!"
-	echo "    - UDP packets work through encrypted tunnel"
-	echo "    - Both shadowsocks UDP encryption and SOCKS5 UDP relay verified"
+	echo "  ✓ Base UDP SOCKS5 relay functional"
+
+	return 0
+}
+
+testUDPLongPayload() {
+	local payload="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"
+
+	echo ""
+	echo "----------------------------------------"
+	echo "Test 4: UDP Long Payload via SOCKS5"
+	echo "----------------------------------------"
+
+	echo -n "  Testing 256-byte UDP echo via SOCKS5 proxy... "
+
+	result=$("${SOCKS5_UDP_ECHO_BIN}" 127.0.0.1:${SOCKS_PORT} 127.0.0.1:${UDP_SERVER_PORT} "$payload" 2>&1)
+
+	if printf '%s' "$result" | grep -q "UDP echo successful"; then
+		echo "PASSED"
+		return 0
+	else
+		echo "FAILED"
+		echo "  Output:"
+		printf '%s\n' "$result" | sed -n '1,10p' | sed 's/^/    /'
+		return 1
+	fi
+	return 0
+}
+
+testUDPHostnameTarget() {
+	local hostname="localhost.localdomain"
+	local resolved
+
+	echo ""
+	echo "----------------------------------------"
+	echo "Test 5: UDP Hostname Target via SOCKS5"
+	echo "----------------------------------------"
+
+	resolved=$(getent ahostsv4 "$hostname" 2>/dev/null | grep "STREAM" | sed -n '1s/ .*//p')
+	if [ "$resolved" != "127.0.0.1" ]; then
+		echo "  SKIPPED"
+		echo "  Reason: $hostname does not resolve to 127.0.0.1 in this environment"
+		return 2
+	fi
+
+	echo -n "  Testing UDP echo via SOCKS5 proxy using hostname target... "
+
+	result=$("${SOCKS5_UDP_ECHO_BIN}" 127.0.0.1:${SOCKS_PORT} ${hostname}:${UDP_SERVER_PORT} "domain-test" 2>&1)
+
+	if printf '%s' "$result" | grep -q "UDP echo successful"; then
+		echo "PASSED"
+		return 0
+	else
+		echo "FAILED"
+		echo "  Output:"
+		printf '%s\n' "$result" | sed -n '1,10p' | sed 's/^/    /'
+		return 1
+	fi
+	return 0
+}
+
+testUDPMultipleTargets() {
+	local target_a="127.0.0.1:${UDP_SERVER_PORT}"
+	local target_b="127.0.0.1:${UDP_SERVER_PORT_ALT}"
+	local result
+
+	echo ""
+	echo "----------------------------------------"
+	echo "Test 6: UDP Multiple Targets via SOCKS5"
+	echo "----------------------------------------"
+
+	echo -n "  Testing alternating UDP targets under one SOCKS5 association... "
+
+	result=$("${SOCKS5_UDP_ECHO_BIN}" 127.0.0.1:${SOCKS_PORT} "$target_a,$target_b,$target_a" "multi-target" 2>&1)
+
+	if printf '%s' "$result" | grep -q "UDP multi-target successful"; then
+		echo "PASSED"
+		return 0
+	else
+		echo "FAILED"
+		echo "  Output:"
+		printf '%s\n' "$result" | sed -n '1,12p' | sed 's/^/    /'
+		return 1
+	fi
+}
+
+runTestCase() {
+	local test_name=$1
+	local status=0
+
+	if "$test_name"; then
+		status=0
+	else
+		status=$?
+	fi
+
+	case "$status" in
+	0)
+		total_tests=$((total_tests + 1))
+		;;
+	2)
+		total_skipped=$((total_skipped + 1))
+		;;
+	*)
+		total_failed=$((total_failed + 1))
+		total_tests=$((total_tests + 1))
+		;;
+	esac
 
 	return 0
 }
@@ -132,6 +261,8 @@ main() {
 	# Initialize test counters
 	local total_tests=0
 	local total_failed=0
+	local total_skipped=0
+	local expected_tests_per_cipher=6
 
 	# Build executables
 	echo -n "Building main executable... "
@@ -167,8 +298,8 @@ main() {
 	fi
 
 	# Start test servers
-	echo -n "Starting test servers (HTTP:${HTTP_SERVER_PORT}, UDP:${UDP_SERVER_PORT})... "
-	"${TEST_SERVERS_BIN}" -http ${HTTP_SERVER_PORT} -udp ${UDP_SERVER_PORT} >/dev/null 2>&1 &
+	echo -n "Starting test servers (HTTP:${HTTP_SERVER_PORT}, UDP:${UDP_SERVER_PORT}, UDP2:${UDP_SERVER_PORT_ALT})... "
+	"${TEST_SERVERS_BIN}" -http ${HTTP_SERVER_PORT} -udp ${UDP_SERVER_PORT} -udp2 ${UDP_SERVER_PORT_ALT} >/dev/null 2>&1 &
 	TEST_SERVERS_PID=$!
 	sleep 1
 	if ! kill -0 $TEST_SERVERS_PID 2>/dev/null; then
@@ -177,7 +308,7 @@ main() {
 		exit 1
 	fi
 	# Verify servers are listening
-	if waitForPort ${HTTP_SERVER_PORT} && waitForPort ${UDP_SERVER_PORT} true; then
+	if waitForPort ${HTTP_SERVER_PORT} && waitForPort ${UDP_SERVER_PORT} true && waitForPort ${UDP_SERVER_PORT_ALT} true; then
 		echo "done"
 	else
 		echo "FAILED"
@@ -193,35 +324,28 @@ main() {
 	# Test each cipher
 	for cipher_config in "${CIPHERS[@]}"; do
 		IFS='|' read -r cipher password extra_args description <<<"$cipher_config"
+		CURRENT_CIPHER="$cipher"
 
 		echo ""
-		echo "[$((total_tests / 2 + 1))/${#CIPHERS[@]}] Testing: $description"
+		local completed_ciphers=$(((total_tests + total_skipped) / expected_tests_per_cipher))
+		echo "[$((completed_ciphers + 1))/${#CIPHERS[@]}] Testing: $description"
 		echo "    Cipher: $cipher"
 
 		# Start services for this cipher
 		if ! startServices "$cipher" "$password" "$extra_args"; then
 			echo "    SKIPPED: Failed to start services"
-			total_failed=$((total_failed + 2))
-			total_tests=$((total_tests + 2))
+			total_failed=$((total_failed + expected_tests_per_cipher))
+			total_tests=$((total_tests + expected_tests_per_cipher))
 			stopServices
 			continue
 		fi
 
-		# Run TCP test
-		if testTCP; then
-			: # passed
-		else
-			total_failed=$((total_failed + 1))
-		fi
-		total_tests=$((total_tests + 1))
-
-		# Run UDP test
-		if testUDP; then
-			: # passed
-		else
-			total_failed=$((total_failed + 1))
-		fi
-		total_tests=$((total_tests + 1))
+		runTestCase testTCPHealth
+		runTestCase testTCPRootPage
+		runTestCase testUDPShortPayload
+		runTestCase testUDPLongPayload
+		runTestCase testUDPHostnameTarget
+		runTestCase testUDPMultipleTargets
 
 		# Stop services for this cipher
 		stopServices
@@ -232,9 +356,15 @@ main() {
 	echo "========================================="
 	echo "Test Summary"
 	echo "========================================="
+	local expected_total=$((expected_tests_per_cipher * ${#CIPHERS[@]}))
+	if [ $((total_tests + total_skipped)) -ne "$expected_total" ]; then
+		echo "Coverage mismatch: ran/skipped $((total_tests + total_skipped)) of $expected_total expected test cases"
+		exit 1
+	fi
 	echo "Total tests: $total_tests"
 	echo "Passed: $((total_tests - total_failed))"
 	echo "Failed: $total_failed"
+	echo "Skipped: $total_skipped"
 	echo ""
 
 	if [ "$total_failed" -eq 0 ]; then

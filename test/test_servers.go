@@ -19,6 +19,7 @@ import (
 var (
 	httpPort = flag.Int("http", 8888, "HTTP server port")
 	udpPort  = flag.Int("udp", 9999, "UDP echo server port")
+	udpPort2 = flag.Int("udp2", 10000, "Secondary UDP echo server port")
 	verbose  = flag.Bool("v", false, "Verbose logging")
 )
 
@@ -46,9 +47,19 @@ func main() {
 		}
 	}()
 
+	// Start secondary UDP echo server
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := startUDPEchoServer(*udpPort2, done); err != nil {
+			log.Printf("UDP server 2 error: %v", err)
+		}
+	}()
+
 	fmt.Printf("Test servers started:\n")
 	fmt.Printf("  HTTP server: http://127.0.0.1:%d\n", *httpPort)
 	fmt.Printf("  UDP echo server: 127.0.0.1:%d\n", *udpPort)
+	fmt.Printf("  UDP echo server 2: 127.0.0.1:%d\n", *udpPort2)
 	fmt.Printf("Press Ctrl+C to stop\n\n")
 
 	// Wait for interrupt signal

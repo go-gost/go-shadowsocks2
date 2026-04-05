@@ -2,6 +2,9 @@ package core
 
 import (
 	"net"
+	"sync"
+
+	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
 type TCPServer struct {
@@ -10,28 +13,52 @@ type TCPServer struct {
 }
 
 func NewTCPServer(config ServerConfig) TCPServer {
-	server := TCPServer{
+	return TCPServer{
 		config: config,
 	}
-
-	return server
 }
 
-// This is a block function
-// When some errors lead to unexpected closing of conn, the caller MUST act
-// in a way that does not exhibit the amount of bytes consumed by the server.
-// This defends against probes that send one byte at a time to detect how many
-// bytes the server consumes before closing the connection.
-func (s *TCPServer) WrapConn(conn net.Conn) (TCPConn, error) {
-	tcpConfig := TCPConfig{Users: s.config.Users}
-	sc := s.config.Cipher.TCPConn(conn, tcpConfig, ROLE_SERVER)
+func (s *TCPServer) WrapConn(conn net.Conn) (net.Conn, error) {
+	sc := s.config.Cipher.TCPConn(conn, s.config.Users, ROLE_SERVER)
 
-	err := sc.InitServer()
-	if err != nil {
-		return nil, err
+	return &tcpServerConn{
+		Conn: conn,
+		core: sc,
+	}, nil
+}
+
+type tcpServerConn struct {
+	net.Conn
+	core TCPConn
+	init sync.Once
+	err  error
+}
+
+func (c *tcpServerConn) Read(b []byte) (int, error) {
+	c.init.Do(c.doInit)
+	if c.err != nil {
+		return 0, c.err
 	}
+	return c.core.Read(b)
+}
 
-	return sc, nil
+func (c *tcpServerConn) Write(b []byte) (int, error) {
+	c.init.Do(c.doInit)
+	if c.err != nil {
+		return 0, c.err
+	}
+	return c.core.Write(b)
+}
+
+func (c *tcpServerConn) Target() socks.Addr {
+	c.init.Do(c.doInit)
+	return c.core.Target()
+}
+
+func (c *tcpServerConn) doInit() {
+	if err := c.core.InitServer(); err != nil {
+		c.err = err
+	}
 }
 
 func (s *TCPServer) Init() error {

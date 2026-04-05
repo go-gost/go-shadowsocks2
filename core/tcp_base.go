@@ -6,11 +6,6 @@ import (
 	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
-// configurartions for shadowsocks TCP connections
-type TCPConfig struct {
-	Users []UserConfig
-}
-
 type TCPConn interface {
 	net.Conn
 
@@ -23,5 +18,5 @@ type TCPConn interface {
 }
 
 type TCPConnCipher interface {
-	TCPConn(net.Conn, TCPConfig, int) TCPConn
+	TCPConn(net.Conn, []UserConfig, int) TCPConn
 }

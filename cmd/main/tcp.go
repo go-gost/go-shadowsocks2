@@ -111,14 +111,27 @@ func tcpRemote(addr netip.AddrPort, config core.ServerConfig) {
 				return
 			}
 
-			rc, err := net.Dial("tcp", sc.Target().String())
+			var target socks.Addr
+			if tc, ok := sc.(interface{ Target() socks.Addr }); ok {
+				target = tc.Target()
+			} else {
+				logf("failed to get target address")
+				return
+			}
+
+			if len(target) == 0 {
+				logf("failed to get target address: target is empty")
+				return
+			}
+
+			rc, err := net.Dial("tcp", target.String())
 			if err != nil {
 				logf("failed to connect to target: %v", err)
 				return
 			}
 			defer rc.Close()
 
-			logf("proxy %s <-> %s", c.RemoteAddr(), sc.Target())
+			logf("proxy %s <-> %s", c.RemoteAddr(), target)
 			if err = relay(sc, rc); err != nil {
 				logf("relay error: %v", err)
 			}

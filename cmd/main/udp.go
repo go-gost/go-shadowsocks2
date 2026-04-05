@@ -3,11 +3,23 @@ package main
 import (
 	"net"
 	"net/netip"
-	"time"
+	"strconv"
+	"sync"
 
 	"github.com/go-gost/go-shadowsocks2/core"
 	"github.com/go-gost/go-shadowsocks2/socks"
 )
+
+func udpClientAssociationKey(clientAddr netip.AddrPort, target socks.Addr) string {
+	return clientAddr.String() + "|" + strconv.Itoa(len(target)) + "|" + string(target)
+}
+
+func udpPacketTargetAddr(addr net.Addr) net.Addr {
+	if targetCarrier, ok := addr.(interface{ TargetAddr() net.Addr }); ok && targetCarrier.TargetAddr() != nil {
+		return targetCarrier.TargetAddr()
+	}
+	return addr
+}
 
 // Listen on laddr for Socks5 UDP packets, encrypt and send to server to reach target.
 func udpSocksLocal(laddr, server netip.AddrPort, config core.ClientConfig) {
@@ -19,10 +31,15 @@ func udpSocksLocal(laddr, server netip.AddrPort, config core.ClientConfig) {
 	defer c.Close()
 	logf("listen udp on: %v", laddr)
 
-	udpClient := core.NewUDPClient(config, 60)
+	udpClient := core.NewUDPClient(config)
+	if err := udpClient.Init(); err != nil {
+		logf("failed to init udp client: %v", err)
+		return
+	}
+
+	var clients sync.Map
 	buf := make([]byte, 64*1024)
 
-	connMap := make(map[netip.AddrPort]*net.UDPConn)
 	for {
 		n, raddr, err := c.ReadFromUDPAddrPort(buf)
 		if err != nil {
@@ -31,48 +48,60 @@ func udpSocksLocal(laddr, server netip.AddrPort, config core.ClientConfig) {
 		}
 
 		tgt := socks.SplitAddr(buf[3:])
-		session, encrypted, err := udpClient.Inbound(buf[3+len(tgt):n], raddr, tgt)
-		if err != nil {
-			logf("cannot write data to server: %v", err)
+		if tgt == nil {
+			logf("UDP local read error: invalid target header")
 			continue
 		}
 
-		pc, _ := connMap[session.ClientAddr()]
-		if pc == nil {
-			pc, err = net.ListenUDP("udp", nil)
+		key := udpClientAssociationKey(raddr, tgt)
+		wrappedAny, ok := clients.Load(key)
+		if !ok {
+			pc, err := net.ListenPacket("udp", "")
 			if err != nil {
 				logf("UDP local listen error: %v", err)
 				continue
 			}
-			connMap[session.ClientAddr()] = pc
+			wrapped := udpClient.WrapConn(pc)
+			actual, loaded := clients.LoadOrStore(key, wrapped)
+			if loaded {
+				wrappedAny = actual
+				pc.Close()
+			} else {
+				wrappedAny = wrapped
+				go func(associationKey string, clientAddr netip.AddrPort, conn net.PacketConn) {
+					defer func() {
+						clients.Delete(associationKey)
+						conn.Close()
+					}()
 
-			go func() {
-				buf := make([]byte, 64*1024)
-				for {
-					n, addr, err := pc.ReadFromUDPAddrPort(buf)
-					if err != nil {
-						logf("faled to read data from target: %v", err)
-						return
+					buf := make([]byte, 64*1024)
+					for {
+						n, addr, err := conn.ReadFrom(buf)
+						if err != nil {
+							logf("failed to read data from server: %v", err)
+							return
+						}
+
+						target := socks.ParseAddr(addr.String())
+						if target == nil {
+							logf("failed to parse returned target address: %v", addr)
+							return
+						}
+
+						resp := append([]byte{0, 0, 0}, target...)
+						resp = append(resp, buf[:n]...)
+
+						if _, err := c.WriteToUDPAddrPort(resp, clientAddr); err != nil {
+							logf("failed to writeback data to %v: %v", clientAddr, err)
+							return
+						}
 					}
-
-					payload, err := udpClient.Outbound(buf[:n], session)
-					if err != nil {
-						logf("failed to handle returned data from target: %v", err)
-						return
-					}
-
-					_, err = c.WriteToUDPAddrPort(payload, session.ClientAddr())
-					if err != nil {
-						logf("failed to writeback data to %v: %v", addr, err)
-						return
-					}
-
-				}
-			}()
+				}(key, raddr, wrapped)
+			}
 		}
 
-		_, err = pc.WriteToUDPAddrPort(encrypted, server)
-		if err != nil {
+		wrapped, _ := wrappedAny.(net.PacketConn)
+		if _, err := wrapped.WriteTo(buf[3+len(tgt):n], core.NewUDPClientPacketAddr(tgt, net.UDPAddrFromAddrPort(raddr))); err != nil {
 			logf("UDP local write error: %v", err)
 			continue
 		}
@@ -88,64 +117,71 @@ func udpRemote(addr netip.AddrPort, config core.ServerConfig) {
 	}
 	defer cc.Close()
 
-	server := core.NewUDPServer(config, 60*time.Second)
+	server := core.NewUDPServer(config)
 	if err := server.Init(); err != nil {
 		logf("failed to init udp server: %v", err)
 	}
+	wrapped := server.WrapConn(cc)
 
 	buf := make([]byte, 64*1024)
-	connMap := make(map[uint64]*net.UDPConn)
 	for {
-		n, raddr, err := cc.ReadFromUDPAddrPort(buf)
+		n, targetAddr, err := wrapped.ReadFrom(buf)
 		if err != nil {
 			logf("UDP remote read error: %v", err)
 			continue
 		}
 
-		session, payload, err := server.Inbound(buf[:n], raddr)
-		if err != nil {
-			logf("failed to inspect packet: %v", err)
+		ctx, ok := targetAddr.(interface {
+			net.Addr
+			Session() core.UDPSession
+		})
+		if !ok {
+			logf("UDP remote read error: missing session context for %v", targetAddr)
+			continue
+		}
+		session := ctx.Session()
+		if session == nil {
+			logf("UDP remote read error: missing session for %v", targetAddr)
 			continue
 		}
 
-		pc := connMap[session.SessionID()]
+		pc := session.Conn()
 		if pc == nil {
-			pc, err = net.ListenUDP("udp", nil)
+			pc, err = net.ListenPacket("udp", "")
 			if err != nil {
 				logf("UDP remote listen error: %v", err)
 				continue
 			}
-			connMap[session.SessionID()] = pc
+			session.SetConn(pc)
 
-			go func() {
+			go func(ctx net.Addr, conn net.PacketConn) {
 				buf := make([]byte, 64*1024)
 				for {
-					n, addr, err := pc.ReadFromUDPAddrPort(buf)
+					n, replyAddr, err := conn.ReadFrom(buf)
 					if err != nil {
-						logf("faled to read data from target: %v", err)
-						return
-
-					}
-
-					encrypted, err := server.Outbound(buf[:n], session)
-					if err != nil {
-						logf("failed to handle returned data from target: %v", err)
+						logf("failed to read data from target: %v", err)
 						return
 					}
 
-					_, err = cc.WriteToUDPAddrPort(encrypted, session.ClientAddr())
-					if err != nil {
-						logf("failed to writeback data to %v: %v", addr, err)
+					replyCtx, ok := ctx.(interface {
+						net.Addr
+						Session() core.UDPSession
+						ClientAddr() net.Addr
+					})
+					if !ok {
+						logf("failed to writeback data to %v: missing session context", ctx)
 						return
 					}
 
+					if _, err := wrapped.WriteTo(buf[:n], core.NewUDPServerPacketAddr(replyAddr, replyCtx.ClientAddr(), replyCtx.Session())); err != nil {
+						logf("failed to writeback data to %v: %v", ctx, err)
+						return
+					}
 				}
-			}()
+			}(targetAddr, pc)
 		}
 
-		targetAddr, _ := session.Target().ToAddrPort()
-		_, err = pc.WriteToUDPAddrPort(payload, targetAddr)
-		if err != nil {
+		if _, err := pc.WriteTo(buf[:n], udpPacketTargetAddr(targetAddr)); err != nil {
 			logf("UDP remote write error: %v", err)
 			continue
 		}

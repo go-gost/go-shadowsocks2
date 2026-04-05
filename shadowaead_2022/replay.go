@@ -13,6 +13,7 @@ type SlidingWindow struct {
 	maxPacketID uint64   // Highest packet ID seen so far
 	bitmap      []uint64 // Bitmap of received packets, bitmap[0] covers newest packets
 	windowSize  uint64   // Size of the sliding window (e.g., 2000)
+	initialized bool
 }
 
 // NewSlidingWindow creates a sliding window filter for anti-replay protection.
@@ -29,6 +30,7 @@ func NewSlidingWindow(windowSize uint64) *SlidingWindow {
 		maxPacketID: 0,
 		bitmap:      make([]uint64, bitmapSize),
 		windowSize:  windowSize,
+		initialized: false,
 	}
 }
 
@@ -41,9 +43,10 @@ func NewSlidingWindow(windowSize uint64) *SlidingWindow {
 // - New packets update the bitmap and slide the window if necessary
 func (w *SlidingWindow) Validate(packetID uint64) bool {
 	// Special case: first packet ever
-	if w.maxPacketID == 0 {
+	if !w.initialized {
 		w.maxPacketID = packetID
 		w.markReceived(0) // Mark position 0 in bitmap
+		w.initialized = true
 		return true
 	}
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"net"
 	"net/netip"
 	"strconv"
 	"time"
@@ -22,10 +23,10 @@ type UDPSessionManager interface {
 	// This function should complete following things:
 	// 1. Decrypt data and send to target
 	// 2. Validate session
-	ServerHandleInbound(encrypted []byte, clientAddr netip.AddrPort) (UDPSession, []byte, error)
+	ServerHandleInbound(encrypted []byte, clientAddr netip.AddrPort) (UDPSession, socks.Addr, []byte, error)
 
 	// This function should return data from target, so it's maybe a block function.
-	ServerHandleOutbound(plaintext []byte, session UDPSession) ([]byte, error)
+	ServerHandleOutbound(plaintext []byte, target socks.Addr, session UDPSession) ([]byte, error)
 
 	ClientHandleInbound(payload []byte, target socks.Addr, clientAddr netip.AddrPort) (UDPSession, []byte, error)
 
@@ -51,6 +52,11 @@ type UDPSession interface {
 
 	// unique id for identifying session
 	Hash() SessionHash
+
+	// Get associated PacketConn (if any)
+	Conn() net.PacketConn
+	// Set associated PacketConn
+	SetConn(net.PacketConn)
 }
 
 func SessionHashFromAddrPort(addr netip.AddrPort) SessionHash {

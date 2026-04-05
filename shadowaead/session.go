@@ -2,6 +2,7 @@ package shadowaead
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,7 @@ type aeadSession struct {
 	clientAddr netip.AddrPort
 	lastUsed   atomic.Int64
 	returning  atomic.Bool
+	conn       net.PacketConn
 }
 
 // newAEADSession creates a new AEAD session.
@@ -65,4 +67,12 @@ func (s *aeadSession) Return(running bool) {
 // touch updates the last used timestamp.
 func (s *aeadSession) Touch() {
 	s.lastUsed.Store(time.Now().Unix())
+}
+
+func (s *aeadSession) Conn() net.PacketConn {
+	return s.conn
+}
+
+func (s *aeadSession) SetConn(c net.PacketConn) {
+	s.conn = c
 }
