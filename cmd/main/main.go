@@ -98,6 +98,8 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		clientConfig.ServerAddr = serverAddr
+		clientConfig.UDPTimeout = config.UDPTimeout
 
 		laddr, _ := netip.ParseAddrPort(flags.Socks)
 
@@ -133,6 +135,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		serverConfig.UDPTimeout = config.UDPTimeout
 		if flags.UDP {
 			go udpRemote(serverAddr, serverConfig)
 		}

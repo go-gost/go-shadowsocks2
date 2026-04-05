@@ -58,12 +58,12 @@ func (a *cp) Decrypter(key, salt []byte) (cipher.AEAD, error) {
 	return a.makeAEAD(subkey)
 }
 
-func (a *cp) TCPConn(c net.Conn, config core.TCPConfig, role int) core.TCPConn {
-	return NewConn(c, a, config, role)
+func (a *cp) TCPConn(c net.Conn, users []core.UserConfig, role int) core.TCPConn {
+	return NewConn(c, a, users, role)
 }
 
-func (a *cp) NewUDPSessionManager(timeout time.Duration, config core.UDPConfig, windowSize, role int) core.UDPSessionManager {
-	userTable := core.UsersToEIHHash(config.Users)
+func (a *cp) NewUDPSessionManager(timeout time.Duration, users []core.UserConfig, windowSize, role int) core.UDPSessionManager {
+	userTable := core.UsersToEIHHash(users)
 	return newUDPSessionManager(a, userTable, timeout, windowSize, role)
 }
 

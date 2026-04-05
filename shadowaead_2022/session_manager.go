@@ -72,15 +72,15 @@ func (m *UDPSessionManager) SetServerConn(conn *net.UDPConn) {
 // 1. Decrypt separate header (AES) to get session ID + packet ID
 // 2. Validate session: anti-replay + NAT rebinding
 // 3. Decrypt main body (AEAD) to get target address + payload
-func (m *UDPSessionManager) ServerHandleInbound(encrypted []byte, clientAddr netip.AddrPort) (core.UDPSession, []byte, error) {
+func (m *UDPSessionManager) ServerHandleInbound(encrypted []byte, clientAddr netip.AddrPort) (core.UDPSession, socks.Addr, []byte, error) {
 	if len(encrypted) < 16 {
-		return nil, nil, ErrShortPacket
+		return nil, nil, nil, ErrShortPacket
 	}
 
 	// Decrypt separate header with AES
 	separateHeader, header, payload, key, err := UnpackUDP(m.cipher, m.userTable, encrypted)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Validate session: get-or-create + anti-replay + update client address
@@ -91,22 +91,18 @@ func (m *UDPSessionManager) ServerHandleInbound(encrypted []byte, clientAddr net
 		key,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	session.Touch()
 
-	target := header.Address
-
-	session.SetTarget(target)
-
-	return session, payload, err
+	return session, header.Address, payload, err
 }
 
 // UDP protocol: session ID + packet counter + target address.
-func (m *UDPSessionManager) ServerHandleOutbound(plaintext []byte, udpSession core.UDPSession) ([]byte, error) {
+func (m *UDPSessionManager) ServerHandleOutbound(plaintext []byte, target socks.Addr, udpSession core.UDPSession) ([]byte, error) {
 	session := udpSession.(*ServerSession)
 
-	encrypted, err := PackUDP(m.cipher, false, session.Key(), session.Key(), plaintext, session.Target(), session.SessionID(), session.GetNextPacketID(), session.ClientSessionID())
+	encrypted, err := PackUDP(m.cipher, false, session.Key(), session.Key(), plaintext, target, session.SessionID(), session.GetNextPacketID(), session.ClientSessionID())
 	if err != nil {
 		return nil, err
 	}

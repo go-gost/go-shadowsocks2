@@ -5,7 +5,6 @@ import (
 	crand "crypto/rand"
 	"encoding/binary"
 	"errors"
-	"math/rand"
 	"time"
 
 	"github.com/go-gost/go-shadowsocks2/core"
@@ -245,7 +244,12 @@ func PackUDP(c core.ShadowCipher, eih bool, separateHeaderKey, bodyKey []byte, p
 		return nil, err
 	}
 
-	pad := rand.Intn(MaxPaddingLength)
+	var pad int
+	if MaxPaddingLength > 0 {
+		b := make([]byte, 2)
+		crand.Read(b)
+		pad = int(binary.BigEndian.Uint16(b)) % MaxPaddingLength
+	}
 	padding := make([]byte, pad)
 	_, err = crand.Read(padding)
 	if err != nil {
@@ -305,82 +309,82 @@ func PackUDP(c core.ShadowCipher, eih bool, separateHeaderKey, bodyKey []byte, p
 	return dst[:totalSize], nil
 }
 
-// UnpackUDP decrypts pkt using SIP022 UDP format (both request and response)
-// Format: AES(separate_header) + AEAD(body)
-// Returns: (header, payload, sessionID, key for decryption, error)
-//
-// The workflow:
-// 1. decrypt separateHeader. For server, use the first key of ciph. For client, use the last key of ciph
-// 2. decrypt Extensible Identity Headers if userTable is not nil
-// 3. decrypt body. For server, use the key from EIH. For client, use the last key of ciph
-// NOTE: For server, there is only one key in the ciph
-func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]core.UserConfig, encrypted []byte) (*SeparateHeader, *UDPHeader, []byte, []byte, error) {
-	// Decrypt separate header with AES using PSK
-	pos := 0
-	decryptKey := ciph.Key()
+func decryptSeparateHeader(ciph core.ShadowCipher, encrypted []byte) (*SeparateHeader, []byte, error) {
+	if len(encrypted) < 16 {
+		return nil, nil, ErrShortPacket
+	}
 
 	encryptedSeparateHeader := encrypted[:16]
 	separateHeaderEncoding, err := decryptSeparateHeaderAES(encryptedSeparateHeader, ciph.Key())
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, err
 	}
-	pos += 16
+
 	separateHeader, err := DecodeSeparateHeader(separateHeaderEncoding)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	// validate Extensible Identity Headers
-	if userTable != nil {
-		aesKey, err := aes.NewCipher(ciph.Key())
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
+	return separateHeader, separateHeaderEncoding, nil
+}
 
-		nextKeyHash := make([]byte, 16)
-		aesKey.Decrypt(nextKeyHash, encrypted[pos:pos+16])
-		nextKeyHash, err = core.XORBytes(nextKeyHash, separateHeaderEncoding)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
-
-		if u, ok := userTable[core.EIHHash(nextKeyHash)]; !ok {
-			return nil, nil, nil, nil, errors.New("no such user")
-		} else {
-			k, err := core.Base64Decode(u.Password)
-			if err != nil {
-				return nil, nil, nil, nil, err
-			}
-
-			decryptKey = k
-		}
-		pos += 16
+func parseEIH(ciph core.ShadowCipher, userTable map[core.EIHHash]core.UserConfig, separateHeaderEncoding []byte, encrypted []byte, pos int) (int, []byte, error) {
+	if userTable == nil {
+		return pos, ciph.Key(), nil
 	}
 
+	if len(encrypted) < pos+16 {
+		return pos, nil, ErrShortPacket
+	}
+
+	aesKey, err := aes.NewCipher(ciph.Key())
+	if err != nil {
+		return pos, nil, err
+	}
+
+	nextKeyHash := make([]byte, 16)
+	aesKey.Decrypt(nextKeyHash, encrypted[pos:pos+16])
+	nextKeyHash, err = core.XORBytes(nextKeyHash, separateHeaderEncoding)
+	if err != nil {
+		return pos, nil, err
+	}
+
+	user, ok := userTable[core.EIHHash(nextKeyHash)]
+	if !ok {
+		return pos, nil, errors.New("no such user")
+	}
+
+	k, err := core.Base64Decode(user.Password)
+	if err != nil {
+		return pos, nil, err
+	}
+
+	return pos + 16, k, nil
+}
+
+func decryptPayload(ciph core.ShadowCipher, decryptKey []byte, separateHeader *SeparateHeader, separateHeaderEncoding []byte, encryptedBody []byte) (*UDPHeader, []byte, error) {
 	salt := make([]byte, 8)
 	binary.LittleEndian.PutUint64(salt, separateHeader.SessionID)
 
 	// Derive session subkey from salt for AEAD
 	aead, err := ciph.Decrypter(decryptKey, salt)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	// Decrypt body with AEAD
-	encryptedBody := encrypted[pos:]
 	if len(encryptedBody) < aead.Overhead() {
-		return nil, nil, nil, nil, ErrShortPacket
+		return nil, nil, ErrShortPacket
 	}
 
 	body, err := aead.Open(encryptedBody[:0], separateHeaderEncoding[4:], encryptedBody, nil)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	// Parse main header from body
 	header, err := DecodeUDPHeader(body)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	// Extract payload (everything after main header)
@@ -391,9 +395,38 @@ func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]core.UserConfi
 		headerLen = 1 + 8 + 8 + 2 + int(header.PaddingLength) + len(header.Address)
 	}
 	if len(body) < headerLen {
-		return nil, nil, nil, nil, ErrShortPacket
+		return nil, nil, ErrShortPacket
 	}
 	payload := body[headerLen:]
+
+	return header, payload, nil
+}
+
+// UnpackUDP decrypts pkt using SIP022 UDP format (both request and response)
+// Format: AES(separate_header) + AEAD(body)
+// Returns: (separateHeader, payloadHeader, payloadBody, key for decryption, error)
+//
+// The workflow:
+// 1. decrypt separateHeader. For server, use the first key of ciph. For client, use the last key of ciph
+// 2. decrypt Extensible Identity Headers if userTable is not nil
+// 3. decrypt body. For server, use the key from EIH. For client, use the last key of ciph
+// NOTE: For server, there is only one key in the ciph
+func UnpackUDP(ciph core.ShadowCipher, userTable map[core.EIHHash]core.UserConfig, encrypted []byte) (*SeparateHeader, *UDPHeader, []byte, []byte, error) {
+	separateHeader, separateHeaderEncoding, err := decryptSeparateHeader(ciph, encrypted)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	pos := 16
+	pos, decryptKey, err := parseEIH(ciph, userTable, separateHeaderEncoding, encrypted, pos)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	header, payload, err := decryptPayload(ciph, decryptKey, separateHeader, separateHeaderEncoding, encrypted[pos:])
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 
 	return separateHeader, header, payload, decryptKey, nil
 }

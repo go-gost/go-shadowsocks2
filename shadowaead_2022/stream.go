@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	mrand "math/rand"
 	"net"
 	"slices"
 	"time"
@@ -80,7 +79,8 @@ type streamConn struct {
 	variableHeader      *RequestVariableLengthHeader
 	fixedHeader         *RequestFixedLengthHeader
 	responseFixedHeader *ResponseFixedLengthHeader
-	clientSalt          []byte                    // Store client salt at connection level
+	receivedSalt        []byte                           // Store salt read from peer
+	mySalt              []byte                           // Store our own salt for verification
 	userTable           map[core.EIHHash]core.UserConfig // Extensible Identity Headers, for server
 	clientID            string
 	key                 []byte // key for encryption and decryption
@@ -495,9 +495,9 @@ func (c *streamConn) loadSalt() error {
 		return err
 	}
 
-	// Store client salt at connection level (always safe)
-	c.clientSalt = make([]byte, len(salt))
-	copy(c.clientSalt, salt)
+	// Store salt read from peer at connection level (always safe)
+	c.receivedSalt = make([]byte, len(salt))
+	copy(c.receivedSalt, salt)
 
 	return nil
 }
@@ -523,12 +523,12 @@ func (c *streamConn) readFixedLengthHeader() error {
 }
 
 func (c *streamConn) readResponseFixedLengthHeader() error {
-	size, err := c.r.readHeaderChunk(1 + 8 + 2 + len(c.clientSalt))
+	size, err := c.r.readHeaderChunk(1 + 8 + 2 + len(c.receivedSalt))
 	if err != nil {
 		return err
 	}
 
-	rFixedHeader, err := DecodeResponseFixedLengthHeader(c.r.buf[:size], len(c.clientSalt))
+	rFixedHeader, err := DecodeResponseFixedLengthHeader(c.r.buf[:size], len(c.receivedSalt))
 	if err != nil {
 		return err
 	}
@@ -608,7 +608,12 @@ func (c *streamConn) readHeaders() error {
 // sendClientHeaders sends salt + EIH + fixed header + variable header for client connections
 func (c *streamConn) sendClientHeaders(initialPayload []byte) error {
 	if len(initialPayload) == 0 {
-		length := mrand.Intn(MaxPaddingLength)
+		var length int
+		if MaxPaddingLength > 0 {
+			b := make([]byte, 2)
+			rand.Read(b)
+			length = int(binary.BigEndian.Uint16(b)) % MaxPaddingLength
+		}
 		padding := make([]byte, length)
 		n, err := rand.Read(padding)
 
@@ -676,7 +681,7 @@ func (c *streamConn) sendClientHeaders(initialPayload []byte) error {
 // sendServerHeader sends salt + response header for server connections
 func (c *streamConn) sendServerHeader(initialPayload []byte) error {
 	// For server, we need the client's salt to include in response
-	if len(c.clientSalt) == 0 {
+	if len(c.receivedSalt) == 0 {
 		return errors.New("client salt not set for server response")
 	}
 
@@ -684,7 +689,7 @@ func (c *streamConn) sendServerHeader(initialPayload []byte) error {
 	responseHeader := &ResponseFixedLengthHeader{
 		Type:        HeaderTypeServerStream,
 		Timestamp:   time.Now().Unix(),
-		RequestSalt: c.clientSalt,
+		RequestSalt: c.receivedSalt,
 		Length:      uint16(len(initialPayload)), // First response chunk has no payload
 	}
 
@@ -735,14 +740,14 @@ func (c *streamConn) sendHeaders(initialPayload []byte) error {
 }
 
 func (c *streamConn) initReader() error {
-	if len(c.clientSalt) == 0 {
+	if len(c.receivedSalt) == 0 {
 		err := c.loadSalt()
 		if err != nil {
 			return err
 		}
 	}
 
-	aead, err := c.Decrypter(c.key, c.clientSalt)
+	aead, err := c.Decrypter(c.key, c.receivedSalt)
 	if err != nil {
 		return err
 	}
@@ -805,7 +810,7 @@ func (c *streamConn) validateResponseFixedLengthHeaders() error {
 		return errors.New("no header received")
 	}
 
-	if slices.Equal(c.clientSalt, c.responseFixedHeader.RequestSalt) {
+	if !slices.Equal(c.mySalt, c.responseFixedHeader.RequestSalt) {
 		return errors.New("salt doesn't match")
 	}
 
@@ -846,7 +851,7 @@ func (c *streamConn) InitServer() error {
 			return err
 		}
 
-		blake3.DeriveKey("shadowsocks 2022 identity subkey", append(c.Key(), c.clientSalt...), subkey)
+		blake3.DeriveKey("shadowsocks 2022 identity subkey", append(c.Key(), c.receivedSalt...), subkey)
 		var aesCipher cipher.Block
 		aesCipher, err = aes.NewCipher(subkey)
 		if err != nil {
@@ -874,7 +879,7 @@ func (c *streamConn) InitServer() error {
 	}
 
 	if c.rState == READER_STATE_INIT {
-		if !CheckSalt(c.clientSalt) {
+		if !CheckSalt(c.receivedSalt) {
 			err = ErrRepeatedSalt
 			return err
 		}
@@ -910,6 +915,7 @@ func (c *streamConn) initWriter() error {
 		return err
 	}
 
+	c.mySalt = salt
 	c.w = newWriter(c.Conn, aead)
 	c.w.salt = salt
 	c.wState = WRITER_STATE_INIT
@@ -924,9 +930,23 @@ func (c *streamConn) Write(b []byte) (int, error) {
 		}
 	}
 
-	if err := c.sendHeaders(b); err != nil {
-		return 0, err
+	if c.wState == WRITER_STATE_INIT {
+		// Limit initial payload to avoid uint16 overflow in fixed header Length field
+		maxInitial := 16384
+		if len(b) > maxInitial {
+			if err := c.sendHeaders(b[:maxInitial]); err != nil {
+				return 0, err
+			}
+			n, err := c.w.Write(b[maxInitial:])
+			return n + maxInitial, err
+		} else {
+			if err := c.sendHeaders(b); err != nil {
+				return 0, err
+			}
+			return len(b), nil
+		}
 	}
+
 	if c.wState != WRITER_STATE_READY {
 		return 0, errors.New("writer is not ready")
 	}
@@ -940,21 +960,31 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 		}
 	}
 
+	var totalRead int64
+
 	if c.wState == WRITER_STATE_INIT {
 		buf := make([]byte, payloadSizeMask-32-43-c.w.Overhead())
 		nr, err := r.Read(buf)
 		if err != nil {
+			if err == io.EOF {
+				if errHeaders := c.sendHeaders(nil); errHeaders != nil {
+					return 0, errHeaders
+				}
+				return 0, nil
+			}
 			return 0, err
 		}
 		if err := c.sendHeaders(buf[:nr]); err != nil {
 			return 0, err
 		}
+		totalRead += int64(nr)
 	}
 
 	if c.wState != WRITER_STATE_READY {
-		return 0, errors.New("writer is not ready")
+		return totalRead, errors.New("writer is not ready")
 	}
-	return c.w.ReadFrom(r)
+	n, err := c.w.ReadFrom(r)
+	return totalRead + n, err
 }
 
 // Generate Extensible Identity Headers
@@ -982,6 +1012,9 @@ func (c *streamConn) AdditionalHeaders(salt []byte) ([]byte, error) {
 }
 
 func (c *streamConn) Target() socks.Addr {
+	if c.variableHeader == nil {
+		return nil
+	}
 	return c.variableHeader.Addr
 }
 
@@ -1013,8 +1046,8 @@ func (c *streamConn) ClientFirstWrite() error {
 }
 
 // NewConn wraps a stream-oriented net.Conn with cipher.
-func NewConn(c net.Conn, ciph core.ShadowCipher, config core.TCPConfig, role int) core.TCPConn {
-	table := core.UsersToEIHHash(config.Users)
+func NewConn(c net.Conn, ciph core.ShadowCipher, users []core.UserConfig, role int) core.TCPConn {
+	table := core.UsersToEIHHash(users)
 
 	return &streamConn{Conn: c, userTable: table, key: ciph.Key(), ShadowCipher: ciph, isServer: role == core.ROLE_SERVER}
 }

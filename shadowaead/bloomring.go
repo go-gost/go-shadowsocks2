@@ -82,11 +82,14 @@ func (r *BloomRing) test(b []byte) bool {
 }
 
 func (r *BloomRing) Check(b []byte) bool {
+	if r == nil {
+		return false
+	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	if r.Test(b) {
+	if r.test(b) {
 		return true
 	}
-	r.Add(b)
+	r.add(b)
 	return false
 }

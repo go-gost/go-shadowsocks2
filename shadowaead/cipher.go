@@ -70,11 +70,11 @@ func (a *cp) Decrypter(_, salt []byte) (cipher.AEAD, error) {
 	return a.makeAEAD(subkey)
 }
 
-func (a *cp) TCPConn(c net.Conn, config core.TCPConfig, role int) core.TCPConn {
+func (a *cp) TCPConn(c net.Conn, users []core.UserConfig, role int) core.TCPConn {
 	return NewConn(c, a)
 }
 
-func (a *cp) NewUDPSessionManager(timeout time.Duration, config core.UDPConfig, windowSize, role int) core.UDPSessionManager {
+func (a *cp) NewUDPSessionManager(timeout time.Duration, users []core.UserConfig, windowSize, role int) core.UDPSessionManager {
 	return NewAEADSessionManager(a, timeout, role)
 }
 

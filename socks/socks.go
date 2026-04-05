@@ -54,6 +54,10 @@ type Addr []byte
 func (a Addr) parse() (string, string) {
 	var host, port string
 
+	if len(a) == 0 {
+		return "", ""
+	}
+
 	switch a[0] { // address type
 	case AtypDomainName:
 		host = string(a[2 : 2+int(a[1])])

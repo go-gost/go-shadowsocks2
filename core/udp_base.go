@@ -1,13 +1,7 @@
 package core
 
-import (
-	"time"
-)
-
-type UDPConfig struct {
-	Users []UserConfig
-}
+import "time"
 
 type UDPConnCipher interface {
-	NewUDPSessionManager(timeout time.Duration, config UDPConfig, windowSize, role int) UDPSessionManager
+	NewUDPSessionManager(timeout time.Duration, users []UserConfig, windowSize, role int) UDPSessionManager
 }

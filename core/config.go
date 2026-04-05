@@ -1,6 +1,9 @@
 package core
 
 import (
+	"net/netip"
+	"time"
+
 	"github.com/zeebo/blake3"
 )
 
@@ -12,12 +15,15 @@ type UserConfig struct {
 }
 
 type ServerConfig struct {
-	Cipher ShadowCipher
-	Users  []UserConfig
+	Cipher     ShadowCipher
+	Users      []UserConfig
+	UDPTimeout time.Duration
 }
 
 type ClientConfig struct {
-	Cipher ShadowCipher
+	Cipher     ShadowCipher
+	ServerAddr netip.AddrPort
+	UDPTimeout time.Duration
 }
 
 func NewUserConfig(name, password string) UserConfig {

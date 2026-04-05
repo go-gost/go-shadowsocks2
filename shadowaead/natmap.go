@@ -2,9 +2,9 @@ package shadowaead
 
 import (
 	"net/netip"
-	"sync"
 	"time"
 
+	"github.com/go-gost/go-shadowsocks2/core"
 	"github.com/go-gost/go-shadowsocks2/socks"
 )
 
@@ -19,109 +19,48 @@ const (
 // SessionManager is a session table mapping client addresses to sessions.
 // For AEAD: stateless NAT, no session IDs.
 type SessionManager struct {
-	sync.RWMutex
-	m       map[netip.AddrPort]*aeadSession
-	timeout time.Duration
-	stop    chan bool
+	cache *core.SessionCache[netip.AddrPort, *aeadSession]
 }
 
 func NewSessionManager(timeout time.Duration) *SessionManager {
-	sm := &SessionManager{
-		m:       make(map[netip.AddrPort]*aeadSession),
-		timeout: timeout,
-		stop:    make(chan bool),
+	return &SessionManager{
+		cache: core.NewSessionCache[netip.AddrPort, *aeadSession](timeout, func(k netip.AddrPort, v *aeadSession) {
+			if v.Conn() != nil {
+				v.Conn().Close()
+			}
+		}),
 	}
-	go sm.cleanLoop()
-	return sm
 }
 
 func (m *SessionManager) Get(key netip.AddrPort) *aeadSession {
-	m.RLock()
-	defer m.RUnlock()
-	return m.m[key]
+	session, _ := m.cache.Get(key)
+	return session
 }
 
 func (m *SessionManager) Set(key netip.AddrPort, session *aeadSession) {
-	m.Lock()
-	defer m.Unlock()
-	m.m[key] = session
+	m.cache.Put(key, session)
 }
 
 func (m *SessionManager) Del(key netip.AddrPort) *aeadSession {
-	m.Lock()
-	defer m.Unlock()
-
-	session, ok := m.m[key]
+	session, ok := m.cache.Get(key)
 	if ok {
-		delete(m.m, key)
+		m.cache.Delete(key)
 		return session
 	}
 	return nil
 }
 
 func (m *SessionManager) GetOrCreate(clientAddr netip.AddrPort, target socks.Addr) *aeadSession {
-	m.Lock()
-	defer m.Unlock()
-
-	if session, exists := m.m[clientAddr]; exists {
+	if session, exists := m.cache.Get(clientAddr); exists {
 		return session
 	}
 
 	session := newAEADSession(target, clientAddr)
-	m.m[clientAddr] = session
+	m.cache.Put(clientAddr, session)
 	return session
 }
 
 // Close stops the cleanup loop and closes all sessions.
 func (m *SessionManager) Close() error {
-	close(m.stop)
-
-	m.Lock()
-	defer m.Unlock()
-
-	m.m = make(map[netip.AddrPort]*aeadSession)
-
-	return nil
-}
-
-// cleanLoop periodically removes expired sessions.
-// Runs every timeout/2 to ensure timely cleanup.
-func (m *SessionManager) cleanLoop() {
-	ticker := time.NewTicker(m.timeout / 2)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.stop:
-			return
-		case <-ticker.C:
-			m.cleanup()
-		}
-	}
-}
-
-// cleanup removes sessions that haven't been used for longer than timeout.
-func (m *SessionManager) cleanup() {
-	now := time.Now()
-	var toDelete []*aeadSession
-
-	// Find expired sessions
-	m.RLock()
-	for _, session := range m.m {
-		if now.Sub(session.LastUsed()) > m.timeout {
-			toDelete = append(toDelete, session)
-		}
-	}
-	m.RUnlock()
-
-	// Delete and close expired sessions
-	if len(toDelete) > 0 {
-		m.Lock()
-		for _, session := range toDelete {
-			if _, ok := m.m[session.ClientAddr()]; ok {
-				delete(m.m, session.ClientAddr())
-			}
-		}
-		m.Unlock()
-	}
+	return m.cache.Close()
 }
