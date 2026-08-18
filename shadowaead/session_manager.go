@@ -71,9 +71,15 @@ func (m *AEADSessionManager) ServerHandleInbound(encrypted []byte, clientAddr ne
 func (m *AEADSessionManager) ServerHandleOutbound(plaintext []byte, target socks.Addr, session core.UDPSession) ([]byte, error) {
 	s := session.(*aeadSession)
 
-	buf := make([]byte, len(plaintext)+m.cipher.SaltSize()+m.cipher.TagSize())
+	// Shadowsocks AEAD UDP carries [addr][payload] in both directions.
+	// The server must prepend the response's source address before encrypting.
+	out := make([]byte, len(target)+len(plaintext))
+	copy(out, target)
+	copy(out[len(target):], plaintext)
 
-	encrypted, err := Pack(buf, plaintext, m.cipher)
+	buf := make([]byte, len(out)+m.cipher.SaltSize()+m.cipher.TagSize())
+
+	encrypted, err := Pack(buf, out, m.cipher)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +121,14 @@ func (m *AEADSessionManager) ClientHandleOutbound(encrypted []byte, udpSession c
 	if err != nil {
 		return nil, err
 	}
+
+	// A compliant server prepends the response source address; strip it
+	// before returning the payload to the caller.
+	addr := socks.SplitAddr(payload)
+	if addr == nil {
+		return nil, ErrShortPacket
+	}
+	payload = payload[len(addr):]
 
 	session.Touch()
 
